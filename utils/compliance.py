@@ -321,13 +321,15 @@ def clean_extract(s):
 
 # ──────────────────── 合规检查规则引擎 ────────────────────
 
-def check_compliance(lc_analysis, doc_results):
+def check_compliance(lc_text, lc_analysis, doc_results, doc_labels=None):
     """
     根据信用证条款分析结果，逐一核对每份提交的单据。
     
     参数:
+        lc_text: LC 原始文本
         lcanalyze_lc(lc_text) 的返回结果
         doc_results: 文件处理结果列表，每个元素为 {"filename", "type", "text", "is_ocr"}
+        doc_labels: 文件标签列表（可选）
     
     返回:
         每份单据的详细检查结果列表
