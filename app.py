@@ -176,7 +176,7 @@ def api_audit():
         # === Phase 1: Extract text from all PDFs ===
         app.logger.info(f"[{job_id}] Phase 1: Extracting text...")
 
-        from utils.pdf_extractor import extract_text, detect_lc_type
+        from utils.pdf_extractor import extract_with_metadata, detect_lc_type
 
         # Detect if the uploaded file is an original LC or a previously generated report
         lc_type, lc_detect_text, _ = detect_lc_type(lc_path)
@@ -189,15 +189,27 @@ def api_audit():
                 "detect_type": "report_pdf",
             }), 400
 
-        lc_text, lc_is_ocr = extract_text(lc_path)
-        app.logger.info(f"[{job_id}] LC text extracted ({len(lc_text)} chars, OCR={lc_is_ocr})")
+        # 使用增强版提取接口获取 LC 文本
+        lc_meta = extract_with_metadata(lc_path)
+        lc_text = lc_meta["text"]
+        lc_is_ocr = lc_meta["is_ocr"]
+        app.logger.info(f"[{job_id}] LC text extracted ({len(lc_text)} chars, method={lc_meta['method']}, conf={lc_meta['confidence']})")
+        if lc_meta.get("warnings"):
+            for w in lc_meta["warnings"]:
+                app.logger.warning(f"[{job_id}] LC extraction warning: {w}")
 
         # Validate that we extracted meaningful LC content
         if not lc_text or len(lc_text.strip()) < 30:
+            # 尝试给用户更有用的错误信息
+            detail_msg = f"提取方法: {lc_meta.get('method', '无')}, 置信度: {lc_meta.get('confidence', 'fail')}"
+            if lc_meta.get("warnings"):
+                detail_msg += ", 警告: " + "; ".join(lc_meta["warnings"][:3])
             return jsonify({
                 "success": False,
                 "error": ("无法从PDF中提取到足够的文本内容。"
-                          "该文件可能是扫描件图片、加密PDF或空文件。请确保上传的是可提取文本的信用证PDF。"),
+                          "该文件可能是扫描件图片、加密PDF或空文件。"
+                          f"<br><small>{detail_msg}</small>"
+                          "<br>请确保上传的是可提取文本的信用证PDF，如果是扫描件系统会自动启用OCR识别。"),
                 "detect_type": "empty_content",
             }), 400
 
@@ -209,11 +221,23 @@ def api_audit():
 
         doc_texts = []
         doc_ocr_flags = []
+        doc_types_guesses = []
         for dp in doc_paths:
-            dt, is_ocr = extract_text(dp)
+            # 使用增强版提取接口 — 自动尝试 OCR 降级
+            dmeta = extract_with_metadata(dp)
+            dt = dmeta["text"]
+            di_ocr = dmeta["is_ocr"]
             doc_texts.append(dt)
-            doc_ocr_flags.append(is_ocr)
-            app.logger.info(f"[{job_id}] Doc extracted ({len(dt)} chars, OCR={is_ocr})")
+            doc_ocr_flags.append(di_ocr)
+            doc_types_guesses.append(dmeta.get("doc_type_guess", ""))
+            
+            app.logger.info(
+                f"[{job_id}] Doc extracted ({len(dt)} chars, method={dmeta['method']}, "
+                f"conf={dmeta['confidence']}, type_guess={dmeta.get('doc_type_guess', '')})"
+            )
+            if dmeta.get("warnings"):
+                for w in dmeta["warnings"]:
+                    app.logger.warning(f"[{job_id}] Doc {dp} warning: {w}")
 
         # === Phase 2: Analyze LC terms ===
         app.logger.info(f"[{job_id}] Phase 2: Analyzing LC terms...")
@@ -236,11 +260,15 @@ def api_audit():
             # Wrap raw text list into dict format expected by check_compliance()
             doc_results = []
             for i, (text, label) in enumerate(zip(doc_texts, doc_labels)):
+                # 使用 pdf_extractor 猜测的类型（如果有的话）作为 filename 的一部分
+                guessed_type = doc_types_guesses[i] if i < len(doc_types_guesses) else ""
+                display_name = f"{guessed_type} — {label}" if guessed_type else label
                 doc_results.append({
-                    "filename": label,
-                    "type": "",
+                    "filename": display_name,
+                    "type": guessed_type,
                     "text": text,
                     "is_ocr": doc_ocr_flags[i] if i < len(doc_ocr_flags) else False,
+                    "path": doc_paths[i] if i < len(doc_paths) else "",
                 })
 
             checks = check_compliance(lc_text, lc_analysis, doc_results, doc_labels)

@@ -11,10 +11,127 @@ from dateutil.parser import parse as parse_date
 
 # ──────────────────── 单据类型识别 ────────────────────
 
+# ── 内容驱动的单据类型识别规则（不依赖文件名）──
+# 每条规则：(type_name, [(关键词, 加权分), ...], 最低阈值)
+_CONTENT_TYPE_RULES = [
+    ("海运提单 (Bill of Lading)", [
+        ("BILL OF LADING", 10), ("B/L", 8), ("OCEAN B/L", 12),
+        ("PORT OF LOADING", 8), ("PORT OF DISCHARGE", 8),
+        ("SHIPPER", 5), ("CONSIGNEE", 5),
+        ("VESSEL", 4), ("CONTAINER NO", 7), ("SEAL NO", 6),
+        ("FREIGHT PREPAID", 6), ("FREIGHT COLLECT", 6),
+        ("MASTER B/L", 10), ("HOUSE B/L", 10), ("FORWARDER", 3),
+        ("TO ORDER", 3), ("ORIGINAL", 2),
+    ], 15),
+
+    ("航空运单 (Airway Bill)", [
+        ("AIRWAY BILL", 10), ("AIRWAYBILL", 10), ("AWB", 9),
+        ("AIR CARGO", 6), ("FLIGHT NO", 8),
+        ("AIRPORT OF DEPARTURE", 8), ("AIRPORT OF DESTINATION", 8),
+        ("CARRIER'S AGENT", 5), ("SHIPPER'S DECLARATION", 4),
+    ], 12),
+
+    ("商业发票 (Commercial Invoice)", [
+        ("COMMERCIAL INVOICE", 15), ("INVOICE NO", 6), ("INVOICE NUMBER", 6),
+        ("INVOICE DATE", 5), ("TOTAL AMOUNT", 5),
+        ("UNIT PRICE", 5), ("QUANTITY", 3), ("DESCRIPTION OF GOODS", 4),
+        ("SUB TOTAL", 4), ("GRAND TOTAL", 5),
+        ("PRICE TERM", 4), ("FOB", 2), ("CIF", 2),
+    ], 18),
+
+    ("形式发票 (Proforma Invoice)", [
+        ("PROFORMA INVOICE", 15), ("PROFORMA", 10),
+        ("PRO-FORMA", 12),
+    ], 12),
+
+    ("装箱单 (Packing List)", [
+        ("PACKING LIST", 15), ("PACKING WEIGHT", 10),
+        ("GROSS WEIGHT", 6), ("NET WEIGHT", 6),
+        ("MEASUREMENT", 6), ("CBM", 5), ("M³", 4),
+        ("NO. OF PACKAGES", 7), ("NO. OF PACKS", 7),
+        ("CARTONS", 4), ("PALLET", 3), ("PACKAGES", 3),
+        ("N.W.", 3), ("G.W.", 3),
+    ], 14),
+
+    ("重量单 (Weight List)", [
+        ("WEIGHT LIST", 12), ("WEIGHT MEMO", 12),
+        ("WEIGHT NOTE", 10), ("CERTIFICATE OF WEIGHT", 12),
+        ("TARE WEIGHT", 5),
+    ], 10),
+
+    ("原产地证 (Certificate of Origin)", [
+        ("CERTIFICATE OF ORIGIN", 15), ("CERTIFIED TRUE COPY", 6),
+        ("COUNTRY OF ORIGIN", 8), ("ORIGIN OF GOODS", 6),
+        ("CERTIFY THAT", 4), ("MANUFACTURED IN", 5),
+        ("FORM A", 10), ("GSP FORM A", 12), ("FORM B", 8),
+        ("CHAMBER OF COMMERCE", 5),
+    ], 14),
+
+    ("保险单 (Insurance Policy/Certificate)", [
+        ("INSURANCE POLICY", 15), ("INSURANCE CERTIFICATE", 13),
+        ("OPEN POLICY", 10), ("CERTIFICATE OF INSURANCE", 12),
+        ("MODE AND CONVEYANCE", 5), ("INSURED VALUE", 5),
+        ("INSURER", 3), ("PREMIUM", 3),
+        ("ALL RISKS", 5), ("ICC(A)", 4), ("ICC(B)", 4), ("ICC(C)", 4),
+    ], 14),
+
+    ("汇票 (Draft/Bill of Exchange)", [
+        ("EXCHANGE FOR", 15), ("DRAFT", 10),
+        ("BILL OF EXCHANGE", 12), ("AT SIGHT", 8),
+        ("DAYS AFTER SIGHT", 10), ("PAY TO THE ORDER OF", 10),
+        ("TENOR", 5), ("DATE OF ISSUE", 4),
+        ("FIRST EXCHANGE", 6), ("SECOND EXCHANGE", 6),
+        ("BEARING DATE", 4),
+    ], 16),
+
+    ("检验证书 (Inspection Certificate)", [
+        ("INSPECTION CERTIFICATE", 12), ("INSPECTION REPORT", 10),
+        ("QUALITY INSPECTION", 8), ("INSPECTION AND TESTING", 8),
+        ("INSPECTED BY", 5), ("RESULT OF INSPECTION", 5),
+        ("SGS", 6), ("INTERTEK", 5), ("BV", 4),
+    ], 12),
+
+    ("品质证明书 (Quality Certificate)", [
+        ("QUALITY CERTIFICATE", 12), ("CERTIFICATE OF QUALITY", 11),
+        ("QUALITY REPORT", 8), ("QUALITY ANALYSIS", 6),
+        ("SPECIFICATION", 4),
+    ], 10),
+
+    ("数量证明书 (Quantity Certificate)", [
+        ("QUANTITY CERTIFICATE", 12), ("CERTIFICATE OF QUANTITY", 11),
+        ("QUANTITY VERIFICATION", 8),
+    ], 8),
+
+    ("受益人证明 (Beneficiary's Certificate)", [
+        ("BENEFICIARY'S CERTIFICATE", 15), ("BENEFICIARY CERTIFICATE", 12),
+        ("BENEFICIARY'S DECLARATION", 12), ("BENEFICIARY DECLARATION", 10),
+        ("WE HEREBY CERTIFY", 5), ("WE HEREBY DECLARE", 5),
+    ], 10),
+
+    ("装运通知 (Shipping Advice)", [
+        ("SHIPPING ADVICE", 12), ("ADVICE OF SHIPMENT", 10),
+        ("SHIPPING NOTICE", 8), ("NOTICE OF SHIPMENT", 8),
+        ("ETD", 4), ("ETA", 4), ("VESSEL NAME", 3),
+    ], 10),
+
+    ("电放保函 (Telex Release)", [
+        ("TELEX RELEASE", 15), ("LETTER OF INDEMNITY", 10),
+        ("LOI TELEX RELEASE", 12), ("RELEASE ORDER", 5),
+    ], 8),
+]
+
+
 def identify_document_type(filename, text=""):
-    """根据文件名和文本内容识别单据类型（中文）。"""
+    """
+    根据文件名和文本内容识别单据类型（中文）。
+    
+    增强版：优先使用文件名快速匹配，如果文件名无法识别，
+    则通过文本内容进行深度分析（内容驱动识别）。
+    """
     name = filename.upper()
     t = text.upper() if text else ""
+
+    # ── 第一层：文件名快速匹配（保持原有逻辑）──
 
     # 提单类
     if any(kw in name for kw in ['BILL OF LADING', 'B/L', 'BL', 'AWB', 'AIRWAY']):
@@ -56,7 +173,7 @@ def identify_document_type(filename, text=""):
     if any(kw in name for kw in ['INSPECTION', 'QC', 'QUALITY']):
         return '检验证书'
 
-    # 证明/声明类
+    # 证明/声明类 — 文件名部分匹配时也尝试用内容确认
     if any(kw in name for kw in ['CERTIFICATE', 'CERT', 'DECLARATION']):
         if 'ORIGIN' in t or 'ORIGIN' in name:
             return '原产地证'
@@ -68,9 +185,50 @@ def identify_document_type(filename, text=""):
             return '品质证明书'
         if 'BENEFICIARY' in t or 'BENEFICIARY' in name:
             return '受益人证明/声明'
-        return '其他证书/声明'
+        # 文件名有 cert 但无法确定具体类型，进入内容驱动层
+        pass
 
-    return "未知单据"
+    # ── 第二层：内容驱动深度识别（当文件名无信息时）──
+    if text and len(text.strip()) >= 20:
+        content_result = _identify_by_content(t)
+        if content_result:
+            return content_result
+
+    # ── 最终兜底：返回"其他单据"而非"未知单据" ──
+    return "其他单据"
+
+
+def _identify_by_content(t: str) -> str:
+    """
+    纯通过文本内容分析来识别单据类型。
+    
+    Args:
+        t: 文本内容（已转大写）
+        
+    Returns:
+        中文单据类型名称，或 None（无法判断）
+    """
+    best_match = None
+    best_score = 0
+    
+    # 只看前 3000 字符（通常头部信息足够判断）
+    sample = t[:3000]
+    
+    for type_name, keywords, threshold in _CONTENT_TYPE_RULES:
+        score = 0
+        matched_keywords = []
+        
+        for keyword, weight in keywords:
+            count = sample.count(keyword)
+            if count > 0:
+                score += count * weight
+                matched_keywords.append(keyword)
+        
+        if score > best_score and score >= threshold:
+            best_score = score
+            best_match = type_name
+    
+    return best_match
 
 
 # ──────────────────── 单据内容提取 ────────────────────
@@ -376,15 +534,34 @@ def check_compliance(lc_text, lc_analysis, doc_results, doc_labels=None):
             })
             doc_check["warn_count"] += 1
 
-        # 基本信息存在性
+        # ── 基本信息存在性 + 智能重试 ──
         if not text or len(text.strip()) < 20:
+            # 尝试从 pdf_extractor 获取更详细的元数据
+            # （app.py 可能只传了基础 extract_text 结果，这里做二次尝试）
+            doc_path = doc.get("path", "")
+            
+            # 如果有文件路径，且文本太短，记录更详细的失败原因
+            fail_detail = "无法从文件中提取有效文本内容，或文本过短"
+            fail_suggestion = "确认文件未加密、非图片格式，或尝试重新上传清晰版 PDF。如为扫描件，系统会自动启用 OCR 识别。"
+            
+            # 尝试根据 filename 猜测类型（即使没有文本）
+            guessed_type = _identify_by_content((filename + " " + (text or "")).upper())
+            doctype_for_display = guessed_type or doctype
+            
             doc_check["items"].append({
                 "check": "文本提取",
                 "status": "FAIL",
-                "detail": "无法从文件中提取有效文本内容，或文本过短。",
-                "suggestion": "确认文件未加密、非图片格式（非扫描件），或尝试重新上传清晰版 PDF。",
+                "detail": f"{fail_detail}（当前文本长度: {len(text.strip() if text else '')} 字符）。",
+                "suggestion": fail_suggestion,
             })
             doc_check["fail_count"] += 1
+        else:
+            # 文本正常，用内容驱动的方式重新确认单据类型
+            content_guess = _identify_by_content(text.upper())
+            if content_guess and doctype == "其他单据":
+                # 文件名没识别出来但内容识别出来了 → 更新类型
+                doctype = content_guess
+                doc_check["doctype"] = doctype
 
         # ── 按单据类型的专项检查 ──
 
