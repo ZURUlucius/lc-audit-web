@@ -644,7 +644,7 @@ def _translate_tranship(val):
 
 
 def _translate_confirm(form_val):
-    """翻译保兑状态"""
+    """翻译保兑状态（从 40A/40B 推断，兼容旧逻辑）"""
     if not form_val:
         return "-"
     u = str(form_val).upper()
@@ -655,19 +655,72 @@ def _translate_confirm(form_val):
     return "WITHOUT (未保兑)"
 
 
+def _translate_confirm_49(confirm_49):
+    """翻译保兑状态（从 49 字段直接取值 — 标准做法）"""
+    if not confirm_49 or not confirm_49.strip():
+        return "- (未注明)"
+    u = str(confirm_49).upper().strip()
+    if "CONFIRM" in u:
+        return "CONFIRMED (已保兑)"
+    if "MAY ADD" in u or "MAYADD" in u:
+        return "MAY ADD (可加保兑)"
+    if "WITHOUT" in u:
+        return "WITHOUT (不加保兑)"
+    # 如果值不匹配已知模式，原样返回
+    return str(confirm_49).strip()
+
+
 def _basic_info_table(analysis, clauses):
-    """构建第一章基本信息的两列表格数据"""
+    """构建第一章基本信息的两列表格数据
+    
+    按照理想模板格式：
+    - 信用证号码优先显示为(21)，因为:21才是 Documentary Credit Number
+      :20 是 Sender's Reference（银行内部参考号）
+    - 到期日和到期地点从 31D 字段中分离：格式通常为 "YYMMDDPLACE" 
+      例如 "260610HONG KONG" -> 到期日=2026-06-10, 到期地=HONG KONG
+    - 信用证形式优先取 40B（新版MT700），其次取 40A
+    - 保兑状态从字段 49 取值（CONFIRM / WITHOUT / MAY ADD）
+    """
     amount_str = analysis.get("amount") or clauses.get("32B", "")
+    
+    # ---- LC 号码标签：优先用 :21（真正的Documentary Credit Number） ----
+    lc_no = analysis.get("lc_no") or "-"
+    lc_tag = "(21)" if clauses.get("21") else ("(20)" if clauses.get("20") else "")
+    lc_label = f"信用证号码 ({lc_tag})" if lc_tag else "信用证号码"
+    
+    # ---- 到期日/地分离：31D 格式通常是 YYMMDD + 地点（无分隔符） ----
+    expiry_raw = clauses.get("31D", "") or analysis.get("expiry_date", "")
+    expiry_date_display = "-"
+    expiry_place_display = analysis.get("expiry_place") or "-"
+    
+    if expiry_raw:
+        # 尝试提取日期部分 (6位数字)
+        dm = re.search(r'(\d{6})', str(expiry_raw))
+        if dm:
+            expiry_date_display = _format_date_yymmdd(dm.group(1)) or dm.group(1)
+            # 日期后面的部分就是地点
+            after_date = expiry_raw[dm.end():].strip()
+            if after_date:
+                expiry_place_display = after_date
+    
+    # ---- 信用证形式：优先 40B，其次 40A ----
+    form_val = clauses.get("40B", "") or clauses.get("40A", "")
+    form_tag = "40B" if clauses.get("40B") else ("40A" if clauses.get("40A") else "")
+    form_label = f"信用证形式 ({form_tag})" if form_tag else "信用证形式"
+    
+    # ---- 保兑状态：从 49 字段取值 ----
+    confirm_val = clauses.get("49", "")
+    
     rows = [
-        (_bf("信用证号码 (20)"), analysis.get("lc_no") or "-"),
+        (_bf(lc_label), lc_no),
         (_bf("开证日期 (31C)"), _format_date_yymmdd(analysis.get("issue_date")) or clauses.get("31C", "-")),
-        (_bf("到期日 (31D)"), _format_date_yymmdd(analysis.get("expiry_date")) or clauses.get("31D", "-")),
-        (_bf("到期地点"), analysis.get("expiry_place") or "-"),
+        (_bf("到期日 (31D)"), expiry_date_display),
+        (_bf("到期地点"), expiry_place_display),
         (_bf("开证行 (51A)"), analysis.get("issuing_bank") or "-"),
         (_bf("通知行 (57A)"), analysis.get("advising_bank") or "-"),
         (_bf("付款方式 (41A)"), clauses.get("41A", "-")),
-        (_bf("信用证形式 (40A)"), _lc_form_cn(clauses.get("40A", ""))),
-        (_bf("保兑状态"), _translate_confirm(clauses.get("40A", ""))),
+        (_bf(form_label), _lc_form_cn(form_val)),
+        (_bf("保兑状态 (49)"), _translate_confirm_49(confirm_val)),
         (_bf("金额 (32B)"), _fmt_amount(amount_str)),
         (_bf("申请人 (50)"), _wrap_long(analysis.get("applicant"), 300)),
         (_bf("受益人 (59)"), _wrap_long(analysis.get("beneficiary"), 300)),
@@ -880,36 +933,65 @@ def _extract_doc_fields(item_text):
 
 
 def _extract_copies(text):
-    """从单据文本中提取份数要求"""
-    patterns = [
-        r'(?:SIGNED\s+)?(?:ORIGINAL(?:\s+SIGNED)?(?:\s+AND)?)(?:\s*[\+\-]?\s*)?(\d?\d*)\s*(?:COPIES?)',
-        r'(\d+)\s*[Xx]\s+(?:COPY|COPIES)',
-        r'(?:ONE|1)\s+ORIGINAL(?:\s+PLUS\s+(\d+)\s+COPIES?)?',
-        r'(\d+)\s+COPIES?(?:\s+(?:OF\s+)?)',
-        r'ORIGINAL(?:S)?\s*(?:ALONE|ONLY)',
-        r'IN\s+(\d+)\s+COPIES?',
-        r'(\d)[\-\+]?\s*FOLD',
-        r'DUPLICATE',
-        r'TRIPLICATE',
-    ]
+    """从单据文本中提取份数要求
+    
+    增强版：支持更多格式
+    - "3 ORIGINALS" -> "3 ORIGINALS"
+    - "1 ORIGINAL + 1 COPY" -> "1 ORIGINAL + 1 COPY"  
+    - "ORIGINAL PLUS 3 COPIES" -> "ORIGINAL PLUS 3 COPIES"
+    - "FULL SET (3/3) ORIGINAL" -> "FULL SET (3/3) ORIGINAL"
+    - "1 ORIGINAL SIGNED" -> "1 ORIGINAL SIGNED"
+    """
     upper_t = text.upper()
-    for pat in patterns:
-        m = re.search(pat, text, re.IGNORECASE)
+    
+    # ---- 优先级1：精确匹配完整份数模式 ----
+    
+    # Pattern: N ORIGINAL[S] [+/- N COPY/COPIES]
+    m = re.search(r'(\d\s*ORIGINAL(?:S)?(?:\s*(?:SIGNED|UNSIGNED))?(?:\s*[\+\-]\s*\d*\s*(?:COPY|COPIES)(?:\s*[\+\-].*)?)?)', text, re.I)
+    if m and len(m.group(1).strip()) > 2:
+        return m.group(1).strip()
+    
+    # Pattern: FULL SET (N/N) ORIGINAL
+    m = re.search(r'FULL\s+SET\s*\(\s*\d+\s*/\s*\d+\s*\)\s*(ORIGINAL|ORIGINALS)', text, re.I)
+    if m:
+        # 提取更完整的上下文
+        m2 = re.search(r'(FULL\s+SET\s*\([^)]+\)\s*ORIGINALS?\b[^.]*)', text, re.I)
+        if m2:
+            return m2.group(1).strip().rstrip('.')
+        return m.group(0).strip()
+    
+    # Pattern: ONE/1 ORIGINAL [PLUS ...]
+    m = re.search(r'(?:ONE|1)\s+ORIGINAL(?:S)?(?:\s+(?:PLUS|AND)\s+.+)?', text, re.I)
+    if m and len(m.group(0).strip()) > 8:
+        return m.group(0).strip()
+    
+    # Pattern: N-FOLD / DUPLICATE / TRIPLICATE
+    for pat_name in [r'\d[\-\+]?\s*-?FOLD', r'DUPLICATE', r'TRIPLICATE']:
+        m = re.search(pat_name, text)
         if m:
-            # 如果有捕获组返回具体数字
-            if m.lastindex and m.group(m.lastindex):
-                num = m.group(m.lastindex).strip()
-                if num.isdigit():
-                    return m.group(0).strip()
-                return m.group(0).strip()  # 如 "DUPLICATE", "TRIPLICATE"
-            else:
-                # 匹配到但无捕获组（如 DUPLICATE, ORIGINAL ALONE）
-                return m.group(0).strip()
-
-    # fallback: 查找 general copies mention
-    if re.search(r'\bCOPIE[S]?\b', upper_t):
-        # 提取包含 copies 的短语
-        cm = re.search(r'.{0,30}\bCOPIE[S]?.{0,20}\b', text, re.I)
+            return m.group(0).strip()
+    
+    # ---- 优先级2：查找任何包含 ORIGINAL/COPY 的份数短语 ----
+    
+    # 查找 "N ORIGINAL(S)" 或 "N COPY(COPIES)"
+    m = re.search(r'(\d+)\s*(ORIGINALS?|COPIES?)(?:\s|$|[,\)])', text, re.I)
+    if m:
+        num = m.group(1)
+        doc_type = m.group(2)
+        # 向前向后扩展以获取更完整的描述
+        start = max(0, m.start() - 20)
+        end = min(len(text), m.end() + 15)
+        context = text[start:end].strip()
+        # 清理开头可能的截断词
+        context = re.sub(r'^\S+\s+', '', context)
+        return context.rstrip('.,:;')
+    
+    # ---- 优先级3：fallback ----
+    if 'ORIGINAL' in upper_t or 'COPY' in upper_t:
+        cm = re.search(r'.{0,25}\bORIGINAL.{0,20}\b', text, re.I)
+        if cm:
+            return cm.group(0).strip()
+        cm = re.search(r'.{0,10}\bCOPIE[S]?.{0,20}\b', text, re.I)
         if cm:
             return cm.group(0).strip()
 
@@ -934,13 +1016,17 @@ def _extract_header(text):
 
 
 def _extract_special_marks(text):
-    """提取单据中的特殊要求标记"""
+    """提取单据中的特殊要求标记
+    
+    增强版：对提单等运输单据提取更完整的关键信息（Notify/Consignee/Freight等）
+    """
     marks = []
+    
+    # 基础标记
     mark_patterns = [
-        ("必须签字", r'\bSIGNED\b'),
+        ("须签字", r'\bSIGNED\b'),
         ("须公证", r'\bLEGALIZ(E|ED)|NOTARIZ(E|ED)\b'),
         ("须认证", r'\b(AUTHENTICATE|CONSULARIZE|ATTEST)\b'),
-        ("须注明L/C号", r'\b(?:CREDIT\s+NO(?:\.|(?:MBER))?|L/?C\s*NO)\b'),
         ("须英文制作", r'\bIN\s+ENGLISH\b'),
         ("须单独寄送", r'\bSEPARATE\s+COURIER|MAIL(?:ED)?\s+DIRECTLY\b'),
         ("正本要求", r'\bORIGINAL\b'),
@@ -951,6 +1037,36 @@ def _extract_special_marks(text):
     for label, pat in mark_patterns:
         if re.search(pat, text, re.IGNORECASE):
             marks.append(label)
+    
+    # ---- 提单特殊标记增强 ----
+    upper_t = text.upper()
+    
+    if 'BILL OF LADING' in upper_t or 'B/L' in upper_t or 'TRANSPORT DOCUMENT' in upper_t:
+        # Consignee 信息
+        m = re.search(r'CONSIGNED?\s+(?:TO\s+)?(.{5,80}?)(?:NOTIF|MARKED|FREIGHT|::|\.)', text, re.I)
+        if m:
+            marks.append(f"Consignee: {m.group(1).strip()[:50]}")
+        
+        # Notify 方信息
+        m = re.search(r'NOTIF[YIES]+[:\s]+(.{5,80}?)(?:MARKED|FREIGHT|::|\.|$)', text, re.I)
+        if m:
+            marks.append(f"Notify: {m.group(1).strip()[:50]}")
+        
+        # Freight 条款
+        m = re.search(r'(?:MARKED|FREIGHT)[:\s]*(?:PAYABLE\s+)?(AT\s+(?:DESTINATION|PREPAID|COLLECT))', text, re.I)
+        if m:
+            marks.append(f"Freight: {m.group(1).strip()}")
+        
+        # Multimodal 可接受
+        if re.search(r'MULTIMODAL', upper_t):
+            marks.append("Multimodal acceptable")
+        
+        # Full Set
+        if re.search(r'FULL\s+SET', upper_t):
+            m = re.search(r'FULL\s+SET[^)]*\)', text, re.I)
+            if m:
+                marks.append(f"Full set: {m.group(0).strip()}")
+
     return marks
 
 
@@ -1396,13 +1512,28 @@ def _extract_addresse_from_47a(cond_47a):
 
 
 def _split_47a_sections(cond_47a):
-    """将47A文本按逻辑分类拆分为多个子区域"""
+    """将47A文本按逻辑分类拆分为多个子区域
+    
+    增强版：
+    - 同时支持 "+" 和 "::" 作为分隔符
+    - 对过长的单条进行二次拆分
+    - 确保每条完整展示不被截断
+    """
     if not cond_47a or not cond_47a.strip():
         return []
 
     sections = []
-    # 按 "+" 开头的子句分割
+    
+    # 先按 "+" 开头的子句分割
     parts = re.split(r'\n(?=\+)', cond_47a)
+    
+    # 如果没有按 + 分割成功（可能文本不含 +），尝试 :: 分割
+    if len(parts) <= 1 and '::' in cond_47a:
+        parts = cond_47a.split('::')
+    
+    # 如果还是没有分割成功，整段作为一项
+    if len(parts) <= 1:
+        parts = [cond_47a]
 
     categories = {
         "document_req": [],
@@ -1415,22 +1546,20 @@ def _split_47a_sections(cond_47a):
 
     for part in parts:
         p_stripped = part.strip()
-        if not p_stripped or len(p_stripped) < 5:
+        if not p_stripped or len(p_stripped) < 3:
             continue
-        pu = p_stripped.upper()
-
-        if any(k in pu for k in ["INSURANCE", "POLICY", "COVER NOTE"]):
-            categories["insurance"].append(p_stripped)
-        elif any(k in pu for k in ["CHARGE", "FEE", "ACCOUNT", "FOR YOUR ACC"]):
-            categories["charges"].append(p_stripped)
-        elif any(k in pu for k in ["DOCUMENT", "PRESENT", "ORIGINAL", "COPY", "ISSUED"]):
-            categories["document_req"].append(p_stripped)
-        elif any(k in pu for k in ["WITHIN", "DAYS", "BEFORE", "AFTER", "LATEST"]):
-            categories["presentation"].append(p_stripped)
-        elif any(k in pu for k in ["SEND", "MAIL", "COURIER", "SWIFT", "IN ONE LOT"]):
-            categories["bank_instruction"].append(p_stripped)
+        
+        # 清理前导的 "+"
+        if p_stripped.startswith("+"):
+            p_stripped = p_stripped[1:].strip()
+        
+        # 如果一条非常长(>200字符)且包含 ::，进一步拆分
+        if len(p_stripped) > 200 and '::' in p_stripped:
+            sub_parts = [s.strip() for s in p_stripped.split('::') if s.strip()]
+            for sp in sub_parts:
+                _categorize_47a_item(sp, categories)
         else:
-            categories["other"].append(p_stripped)
+            _categorize_47a_item(p_stripped, categories)
 
     cat_labels = {
         "document_req": "单据制作/提交要求",
@@ -1446,6 +1575,24 @@ def _split_47a_sections(cond_47a):
             sections.append((cat_labels[cat_key], cat_items))
 
     return sections
+
+
+def _categorize_47a_item(item_text, categories):
+    """将单个 47A 子条目归入对应类别"""
+    pu = item_text.upper()
+
+    if any(k in pu for k in ["INSURANCE", "POLICY", "COVER NOTE"]):
+        categories["insurance"].append(item_text)
+    elif any(k in pu for k in ["CHARGE", "FEE", "ACCOUNT", "FOR YOUR ACC"]):
+        categories["charges"].append(item_text)
+    elif any(k in pu for k in ["DOCUMENT", "PRESENT", "ORIGINAL", "COPY", "ISSUED"]):
+        categories["document_req"].append(item_text)
+    elif any(k in pu for k in ["WITHIN", "DAYS", "BEFORE", "AFTER", "LATEST"]):
+        categories["presentation"].append(item_text)
+    elif any(k in pu for k in ["SEND", "MAIL", "COURIER", "SWIFT", "IN ONE LOT"]):
+        categories["bank_instruction"].append(item_text)
+    else:
+        categories["other"].append(item_text)
 
 
 def _build_chapter4_47a_conditions(story, S, analysis, clauses):
@@ -1500,7 +1647,7 @@ ANOMALY_TYPE_CONFIG = {
         "color": C.RED_BD,
         "bg_color": C.RED_BG,
         "style_name": "risk_high",
-        "icon": "⚠",
+        "icon": "[!]",  # 纯ASCII，避免CJK字体渲染乱码
         "desc_template": "信用证内两个或多个条款之间存在直接逻辑矛盾，导致无法同时满足。",
     },
     "T2-操作不合理": {
@@ -1509,7 +1656,7 @@ ANOMALY_TYPE_CONFIG = {
         "color": C.AMBER_BD,
         "bg_color": C.AMBER_BG,
         "style_name": "risk_med",
-        "icon": "⏱",
+        "icon": "[T]",  # Time/操作
         "desc_template": "条款要求在实际操作中难以满足或存在极紧的时间压力。",
     },
     "T3-模糊/不完整": {
@@ -1518,7 +1665,7 @@ ANOMALY_TYPE_CONFIG = {
         "color": C.AMBER_BD,
         "bg_color": C.AMBER_BG,
         "style_name": "risk_med",
-        "icon": "?",
+        "icon": "[?]",
         "desc_template": "条款表述不够明确或缺少关键信息，可能导致不同解读。",
     },
     "T4-非常规财务": {
@@ -1527,7 +1674,7 @@ ANOMALY_TYPE_CONFIG = {
         "color": C.RED_BD,
         "bg_color": C.RED_BG,
         "style_name": "risk_high",
-        "icon": "$",
+        "icon": "[$]",  # Financial
         "desc_template": "涉及非标准金融条款（如自动扣款/罚金），可能影响实际收款金额。",
     },
     "T5-疑似软条款": {
@@ -1536,7 +1683,7 @@ ANOMALY_TYPE_CONFIG = {
         "color": C.RED_BD,
         "bg_color": C.RED_BG,
         "style_name": "risk_high",
-        "icon": "🔒",
+        "icon": "[S]",  # Soft clause
         "desc_template": "条款要求依赖申请人配合或主观判断，受益人无法自主控制。",
     },
     "T6-单据冲突风险": {
@@ -1545,7 +1692,7 @@ ANOMALY_TYPE_CONFIG = {
         "color": C.AMBER_BD,
         "bg_color": C.AMBER_BG,
         "style_name": "risk_med",
-        "icon": "📄",
+        "icon": "[D]",  # Document
         "desc_template": "46A单据要求与47A附加条件之间存在潜在的不一致或不匹配。",
     },
     "T7-UCP600偏离": {
@@ -1554,7 +1701,7 @@ ANOMALY_TYPE_CONFIG = {
         "color": C.BLUE,
         "bg_color": C.LIGHT_BLUE,
         "style_name": "body",
-        "icon": "📋",
+        "icon": "[U]",  # UCP
         "desc_template": "条款与UCP600国际惯例存在偏离，需特别注意其影响。",
     },
 }
@@ -1750,7 +1897,9 @@ def _render_anomaly_table(story, S, anomalies, clauses=None):
         rows.append(row_data)
 
     # ---- 表格样式 ----
-    col_widths = [22*mm, 16*mm, 48*mm, 38*mm, 32*mm]
+    # A4 可用宽度 = 210mm - 18mm*2(margin) = 174mm
+    # 分配: 类型22 | 字段16 | 摘录44 | 问题44 | 剩余48 → 总计174mm
+    col_widths = [20*mm, 15*mm, 43*mm, 43*mm, 33*mm]
 
     t = Table(rows, colWidths=col_widths)
 
@@ -1872,7 +2021,7 @@ def _default_suggestion_for_type(atype):
         "T2-操作不合理": "评估可行性后考虑申请修改此条款，或提前做好应对准备。",
         "T3-模糊/不完整": "主动联系开证行获取补充说明或修改为明确表述。",
         "T4-非常规财务": "计算实际收款金额对利润的影响；若不可接受应立即申请修改。",
-        "T5-疑似软条款": "⚠ 软条款属高风险项。强烈建议在发货前要求申请人删除或修改该条款。",
+        "T5-疑似软条款": "[!] 软条款属高风险项。强烈建议在发货前要求申请人删除或修改该条款。",
         "T6-单据冲突风险": "仔细核对46A与47A中相关单据的要求差异，制单时以更严格者为准。",
         "T7-UCP600偏离": "了解该偏离条款的实际含义和对业务的影响范围。",
     }
@@ -2459,19 +2608,19 @@ def _make_anomaly(atype, fields, original_text, description, suggestion, severit
 # ---- 风险维度配置常量 ----
 
 RISK_CATEGORIES = {
-    "time":      {"label_cn": "时间风险",       "icon": "\u23f1", "color": C.AMBER_BD,  "bg": C.AMBER_BG},
-    "payment":   {"label_cn": "收汇风险",       "icon": "\u274c", "color": C.RED_BD,     "bg": C.RED_BG},
-    "operation": {"label_cn": "操作风险",       "icon": "\u2699", "color": C.AMBER_BD,  "bg": C.AMBER_BG},
-    "compliance":{"label_cn": "合规风险",       "icon": "\u26ab", "color": C.RED_BD,     "bg": C.RED_BG},
-    "financial": {"label_cn": "财务风险",       "icon": "\u0024", "color": C.RED_BD,     "bg": C.RED_BG},
-    "document":  {"label_cn": "单据风险",       "icon": "\u1f4c4", "color": C.AMBER_BD,  "bg": C.AMBER_BG},
+    "time":      {"label_cn": "时间风险",       "icon": "[T]",   "color": C.AMBER_BD,  "bg": C.AMBER_BG},
+    "payment":   {"label_cn": "收汇风险",       "icon": "[$]",   "color": C.RED_BD,     "bg": C.RED_BG},
+    "operation": {"label_cn": "操作风险",       "icon": "[O]",   "color": C.AMBER_BD,  "bg": C.AMBER_BG},
+    "compliance":{"label_cn": "合规风险",       "icon": "[R]",   "color": C.RED_BD,     "bg": C.RED_BG},
+    "financial": {"label_cn": "财务风险",       "icon": "[$]",   "color": C.RED_BD,     "bg": C.RED_BG},
+    "document":  {"label_cn": "单据风险",       "icon": "[D]",   "color": C.AMBER_BD,  "bg": C.AMBER_BG},
 }
 
 RISK_SEVERITY_CONFIG = {
-    "critical": {"order": 4, "label": "\u2620\u4e25\u91cd", "color": "#7F1D1D", "bd": C.RED_BD, "bg": "#FEE2E2"},
-    "high":     {"order": 3, "label": "\u26a0\u9ad8",    "color": "#DC2626", "bd": C.RED_BD, "bg": "#FEE2E2"},
-    "medium":   {"order": 2, "label": "\u25b6\u4e2d",    "color": "#D97706", "bd": C.AMBER_BD,"bg": "#FEF3C7"},
-    "low":      {"order": 1, "label": "\u25cb\u4f4e",    "color": "#059669", "bd": C.GREEN_BD,"bg": "#D1FAE5"},
+    "critical": {"order": 4, "label": "CRITICAL", "color": "#7F1D1D", "bd": C.RED_BD, "bg": "#FEE2E2"},
+    "high":     {"order": 3, "label": "HIGH",   "color": "#DC2626", "bd": C.RED_BD, "bg": "#FEE2E2"},
+    "medium":   {"order": 2, "label": "MEDIUM",  "color": "#D97706", "bd": C.AMBER_BD,"bg": "#FEF3C7"},
+    "low":      {"order": 1, "label": "LOW",     "color": "#059669", "bd": C.GREEN_BD,"bg": "#D1FAE5"},
 }
 
 
@@ -2491,7 +2640,7 @@ def _build_chapter6_risk_matrix(story, S, analysis, clauses, anomalies):
       - 按 severity 降序排列，高危行红色背景高亮
       - 与第五章 V2 异常引擎联动（复用检测结果）
     """
-    story.append(Paragraph("\u516d\u3001\u98ce\u9e9a\u77e9\u9635 / Risk Matrix", S["h1"]))
+    story.append(Paragraph("六、风险矩阵 / Risk Matrix", S["h1"]))
 
     # ---- 执行全面风险扫描 ----
     risk_items = _scan_risk_items(analysis, clauses, anomalies)
@@ -2499,10 +2648,10 @@ def _build_chapter6_risk_matrix(story, S, analysis, clauses, anomalies):
     # ---- 无风险时快速返回 ----
     if not risk_items:
         story.append(note_box(
-            "[OK] \u672a\u68c0\u6d4b\u5230\u663e\u8457\u98ce\u9e9a",
-            "\u672c\u4fe1\u7528\u8bc1\u6761\u6b3e\u7ecf 12+ \u7ef4\u5ea6\u4e1a\u52a1\u98ce\u9e9a\u626b\u63cf\u540e\uff0c"
-            "\u672a\u53d1\u73b0\u65f6\u95f4/\u6536\u6c47/\u64cd\u4f5c/\u5408\u89c4/\u8d22\u52a1/\u5355\u636e\u7c7b\u578b\u7684\u9ad8\u98ce\u9e9a\u3002<br/><br/>"
-            "<i>\u6ce8\uff1a\u98ce\u9e9a\u77e9\u9635\u4ece\u4e1a\u52a1\u89c6\u89d2\u51fa\u53d1\uff0c\u4e13\u6ce8\u4e8e\u5b9e\u9645\u64cd\u4f5c\u4e2d\u53ef\u80fd\u9047\u5230\u7684\u56f0\u96be\u3002</i>",
+            "[OK] 未检测到显著风险",
+            "本信用证条款经 12+ 维度业务风险扫描后，"
+            "未发现时间/收汇/操作/合规/财务/单据类型的高风险。<br/><br/>"
+            "<i>注：风险矩阵从业务视角出发，专注于实际操作中可能遇到的困难。</i>",
             "success"
         ))
         return
@@ -2558,10 +2707,10 @@ def _render_risk_stats_panel(story, S, risk_items):
     # Line 1: 综合得分 + 总数
     score_color = _score_color(overall_score)
     lines.append(
-        _bf(f"\u7efc\u5408\u98ce\u9e9a\u5f97\u5206: ")
+        _bf(f"综合风险得分: ")
         + f"<font color='{score_color}' size='11'><b>{overall_score}/100</b></font>"
         + f"  |  "
-        + _bf(f"\u5171 {total} \u9879\u98ce\u9e9a")
+        + _bf(f"共 {total} 项风险")
     )
 
     # Line 2: 等级分布
@@ -2572,7 +2721,7 @@ def _render_risk_stats_panel(story, S, risk_items):
             sev_parts.append(
                 f"<font color='{cfg['color']}'><b>{cfg['label']}: {sev_counts[sev_key]}</b></font>"
             )
-    lines.append(_bf("\u7b49\u7ea7\u5206\u5e03:") + "  " + "  ".join(sev_parts))
+    lines.append(_bf("等级分布:") + "  " + "  ".join(sev_parts))
 
     # Line 3: 类别分布
     cat_parts = []
@@ -2582,7 +2731,7 @@ def _render_risk_stats_panel(story, S, risk_items):
         cat_label = cat_cfg.get("label_cn", cat)
         cat_icon = cat_cfg.get("icon", "?")
         cat_parts.append(f"{cat_icon}{cat_label}({cnt})")
-    lines.append(_bf("\u7c7b\u522b\u5206\u5e03:") + "  " + ", ".join(cat_parts))
+    lines.append(_bf("类别分布:") + "  " + ", ".join(cat_parts))
 
     # 用 info box 展示
     content = "<br/>".join(lines)
@@ -2592,10 +2741,10 @@ def _render_risk_stats_panel(story, S, risk_items):
 def _render_risk_matrix_table(story, S, risk_items):
     """渲染4列风险矩阵主表格"""
     header_row = [
-        Paragraph("<b>\u98ce\u9e9a\u9879\u76ee</b>", S["th"]),
-        Paragraph("<b>\u4e25\u91cd\u5ea6</b>", S["th"]),
-        Paragraph("<b>\u6765\u6e90\u5b57\u6bb5</b>", S["th"]),
-        Paragraph("<b>\u8bf4\u660e</b>", S["th"]),
+        Paragraph("<b>风险项目</b>", S["th"]),
+        Paragraph("<b>严重度</b>", S["th"]),
+        Paragraph("<b>来源字段</b>", S["th"]),
+        Paragraph("<b>说明</b>", S["th"]),
     ]
 
     rows = [header_row]
@@ -2605,9 +2754,9 @@ def _render_risk_matrix_table(story, S, risk_items):
         cat = ri.get("category", "operation")
         cat_cfg = RISK_CATEGORIES.get(cat, {})
         cat_icon = cat_cfg.get("icon", "")
-        item_name = ri.get("name", "\u672a\u77e5\u98ce\u9e9a")
+        item_name = ri.get("name", "未知风险")
         score_val = ri.get("score", 50)
-        col1_html = f"{cat_icon} <b>{_esc(item_name)}</b><br/><font size='7' color='#6B7280'>\u5f97\u5206:{score_val}/100</font>"
+        col1_html = f"{cat_icon} <b>{_esc(item_name)}</b><br/><font size='7' color='#6B7280'>Score:{score_val}/100</font>"
         col1 = Paragraph(col1_html, S["body"])
 
         # Col 2: 严重度标签
@@ -2624,14 +2773,15 @@ def _render_risk_matrix_table(story, S, risk_items):
         impact = ri.get("impact", "")
         body_html = _esc(desc_text[:220])
         if impact:
-            body_html += f"<br/><br/><font color='#4B5563' size='7.5'>\u5f71\u54cd: {_esc(impact[:120])}</font>"
+            body_html += f"<br/><br/><font color='#4B5563' size='7.5'>Impact: {_esc(impact[:120])}</font>"
         col4 = Paragraph(body_html, S["bl"])
 
         row_data = [col1, col2, col3, col4]
         rows.append(row_data)
 
     # 表格样式
-    col_widths = [34*mm, 16*mm, 18*mm, 86*mm]
+    # A4 可用宽度 = 174mm; 分配: 风险项目38 | 严重度16 | 来源18 | 说明102 = 174mm
+    col_widths = [36*mm, 15*mm, 17*mm, 86*mm]
     t = Table(rows, colWidths=col_widths)
 
     base_style = [
@@ -2670,7 +2820,7 @@ def _render_risk_mitigation_summary(story, S, risk_items):
         return
 
     story.append(Spacer(1, 6*mm))
-    story.append(Paragraph(_bf("\u2620 \u5fc5\u987b\u5728\u53d1\u8d70\u524d\u5e94\u5bf9\u7684\u98ce\u9e9a:"), S["h2"]))
+    story.append(Paragraph(_bf("[!] 必须在发走前应对的风险:"), S["h2"]))
 
     for i, ri in enumerate(priority_items):
         name = ri.get("name", "")
@@ -2681,10 +2831,10 @@ def _render_risk_mitigation_summary(story, S, risk_items):
         body = f"<b>[#{i+1}] {_esc(name)}</b>"
         body += f"<br/>{_esc(desc)}"
         if mitigation:
-            body += f"<br/><br/>\u25b6 <b>\u5e94\u5bf9\u63aa\u65bd:</b> {_esc(mitigation[:180])}"
+            body += f"<br/><br/>[>] <b>应对措施:</b> {_esc(mitigation[:180])}"
 
         level = "danger" if sev == "critical" else "warning"
-        story.append(note_box(f"\u9ad8\u4f18\u5148\u7ea7 #{i+1}", body, level))
+        story.append(note_box(f"高优先级 #{i+1}", body, level))
         story.append(Spacer(1, 2*mm))
 
 
@@ -3061,14 +3211,20 @@ def _score_color(score):
 # ---------- 第七章：交单备查清单 ----------
 
 def _build_chapter7_checklist(story, S, analysis, clauses):
-    """第七章：交单备查清单 / Compliance Checklist — 按单据分组checkbox格式"""
+    """第七章：交单备查清单 / Compliance Checklist — 按单据分组checkbox格式
+    
+    按理想模板优化：
+    - 按单据类别分组（商业发票/装箱单/提单/通用要求）
+    - 条款要求内容截断为合理长度避免溢出
+    - 列宽适配A4页面
+    """
     story.append(Paragraph("七、交单备查清单 / Compliance Checklist", S["h1"]))
 
     checklist_items = []
 
     # --- 从各字段逐条提取明确的交单要求 ---
 
-    # 1. 单据要求 (46A)
+    # 1. 单据要求 (46A) - 按单据类型展开
     doc_46a = clauses.get("46A", "")
     if doc_46a and doc_46a.strip():
         try:
@@ -3080,14 +3236,21 @@ def _build_chapter7_checklist(story, S, analysis, clauses):
         for idx, doc in enumerate(docs_p):
             if isinstance(doc, dict):
                 raw = doc.get("raw_content", str(doc))
-                dtype = doc.get("type", "其他单据")
+                dtype = doc.get("type_cn", "其他单据")
+                copies = doc.get("copies", "")
+                # 组合份数和原文，更清晰
+                if copies and copies != "-":
+                    display_text = f"[{copies}] {raw[:200]}"
+                else:
+                    display_text = raw[:250]
             else:
                 raw = str(doc)
                 dtype = _doc_type_cn(raw[:80])
+                display_text = raw[:250]
 
             checklist_items.append({
-                "category": "单据准备 (46A)",
-                "requirement": raw[:250],
+                "category": f"单据: {dtype}",
+                "requirement": display_text,
                 "clause_ref": f"46A 第{idx+1}项",
                 "priority": "必须",
             })
@@ -3140,17 +3303,17 @@ def _build_chapter7_checklist(story, S, analysis, clauses):
                     seen_47a.add(key)
                     checklist_items.append({
                         "category": "附加条件 (47A)",
-                        "requirement": sub_s[:250],
+                        "requirement": sub_s[:200],  # 截断过长文本
                         "clause_ref": "47A",
                         "priority": "必须",
                     })
 
-    # 5. 78 寄单指示
+    # 5. 78 寄单指示（截断过长文本）
     inst_78 = clauses.get("78", "")
     if inst_78 and len(inst_78.strip()) > 10:
         checklist_items.append({
             "category": "付款/寄单指示",
-            "requirement": inst_78[:250],
+            "requirement": inst_78[:200],
             "clause_ref": "78",
             "priority": "必须",
         })
@@ -3160,7 +3323,7 @@ def _build_chapter7_checklist(story, S, analysis, clauses):
     if charges:
         checklist_items.append({
             "category": "费用注意",
-            "requirement": charges[:200],
+            "requirement": charges[:150],
             "clause_ref": "71B/71D",
             "priority": "注意",
         })
@@ -3174,8 +3337,8 @@ def _build_chapter7_checklist(story, S, analysis, clauses):
         Paragraph("<b>序号</b>", S["th"]),
         Paragraph("<b>类别</b>", S["th"]),
         Paragraph("<b>条款要求内容</b>", S["th"]),
-        Paragraph("<b>条款依据</b>", S["th"]),
-        Paragraph("<b>重要性</b>", S["th"]),
+        Paragraph("<b>依据</b>", S["th"]),
+        Paragraph("<b>重要</b>", S["th"]),
     ]]
 
     pri_map = {
@@ -3187,15 +3350,19 @@ def _build_chapter7_checklist(story, S, analysis, clauses):
         pri = item.get("priority", "注意")
         bd_col, tag = pri_map.get(pri, (C.GREY, "[ ]"))
 
+        req_text = item.get("requirement", "")
+        cat_text = item.get("category", "")
+
         rows.append([
             Paragraph(str(i + 1), S["tc"]),
-            Paragraph(_esc(item.get("category", "")), S["small"]),
-            Paragraph(_esc(item.get("requirement", "")), S["bl"]),
+            Paragraph(_esc(cat_text), S["small"]),
+            Paragraph(_esc(req_text), S["bl"]),
             Paragraph(_esc(item.get("clause_ref", "-")), S["tc"]),
             tag_cell(tag, bd_col, C.WHITE),
         ])
 
-    t = Table(rows, colWidths=[10*mm, 36*mm, 74*mm, 18*mm, 16*mm])
+    # A4 可用宽度 174mm; 分配: 序号10 | 类别28 | 要求90 | 依据16 | 剩余30 = 174mm
+    t = Table(rows, colWidths=[9*mm, 27*mm, 88*mm, 16*mm, 14*mm])
     t.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("BACKGROUND", (0, 0), (-1, 0), hex_color(C.NAVY)),
@@ -3213,7 +3380,7 @@ def _build_chapter7_checklist(story, S, analysis, clauses):
     # 范围说明
     story.append(Spacer(1, 3*mm))
     story.append(note_box(
-        "[i] 清单范围说明",
+        "[i] 提示",
         "本备查清单仅包含本信用证明确写入的条款要求。未出现在本证中的行业惯例要求不在此列。",
         "info"
     ))

@@ -789,13 +789,38 @@ def analyze_lc(lc_text):
     # ── 异常检测 ──
     anomalies = detect_anomalies(fields)
 
-    # ── 效期地点解析 ──
+    # ── 效期地点解析（31D 格式: YYMMDD[PLACE]） ──
+    # 31D 的标准格式是日期(6位)后面紧跟地点，无分隔符
+    # 例如 "260610HONG KONG" -> date=260610, place="HONG KONG"
+    # 某些格式可能包含 "/" 分隔，如 "260610/HONG KONG"
     expiry_place = ""
-    if "/" in expiry_raw:
-        parts = expiry_raw.split("/")
-        expiry_place = parts[-1].strip() if len(parts) > 1 else ""
-    else:
-        expiry_place = expiry_raw
+    expiry_date_only = ""
+    if expiry_raw and expiry_raw != "N/A":
+        # 先尝试按 "/" 分割
+        if "/" in expiry_raw:
+            parts = expiry_raw.split("/")
+            expiry_date_only = parts[0].strip() if parts else ""
+            expiry_place = parts[-1].strip() if len(parts) > 1 else ""
+        else:
+            # 无分隔符：提取开头的6位数字作为日期，剩余部分作为地点
+            dm = re.match(r'^(\d{6})\s*(.+)$', expiry_raw.strip())
+            if dm:
+                expiry_date_only = dm.group(1)
+                expiry_place = dm.group(2).strip()
+            else:
+                # 如果没有地点后缀，整串可能是纯日期
+                if re.match(r'^\d{6}$', expiry_raw.strip()):
+                    expiry_date_only = expiry_raw.strip()
+                    expiry_place = ""
+                else:
+                    # 无法解析，整串作为地点
+                    expiry_place = expiry_raw.strip()
+    
+    # 如果没解析到地点但有完整原始值，做最后尝试
+    if not expiry_place and expiry_raw and expiry_raw != "N/A":
+        # 可能是纯地点（某些银行只写地点不写日期）
+        if not re.match(r'^\d{6}', expiry_raw.strip()):
+            expiry_place = expiry_raw.strip()
 
     # ── 71B 费用条款 ──
     charges_info = {
