@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LC Audit Web - 信用证审核系统</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- 顶部导航 -->
+        <header class="top-nav">
+            <div class="nav-brand">
+                <span class="nav-icon">&#x1F4CB;</span>
+                <h1>LC Audit Web</h1>
+                <span class="nav-subtitle">信用证审核系统</span>
+            </div>
+            <nav class="nav-links">
+                <a href="#how-to-use">使用说明</a>
+                <a href="#about">关于</a>
+            </nav>
+        </header>
+
+        <!-- 主内容区 -->
+        <main class="main-content">
+            <!-- 上传区域 -->
+            <section class="upload-section" id="upload-section">
+                <div class="section-header">
+                    <h2>&#x1F4E4; 上传文件</h2>
+                    <p class="section-desc">上传信用证（L/C）及交单文件，系统将自动进行条款分析和合规审核</p>
+                </div>
+
+                <!-- 审核模式选择 -->
+                <div class="mode-selector">
+                    <button class="mode-btn active" data-mode="full" onclick="selectMode('full')">
+                        <span class="mode-icon">&#x1F50D;</span>
+                        <span class="mode-title">完整审核</span>
+                        <span class="mode-desc">上传 L/C + 全部交单文件，生成完整合规报告</span>
+                    </button>
+                    <button class="mode-btn" data-mode="lc-only" onclick="selectMode('lc-only')">
+                        <span class="mode-icon">&#x1F4DD;</span>
+                        <span class="mode-title">仅审条款</span>
+                        <span class="mode-desc">仅上传 L/C，分析条款要点与风险</span>
+                    </button>
+                </div>
+
+                <form id="upload-form" enctype="multipart/form-data">
+                    <!-- LC 文件上传区 -->
+                    <div class="upload-zone" id="lc-zone">
+                        <input type="file" id="lc-file" name="lc_file" accept=".pdf" required onchange="handleFileSelect(this, 'lc')">
+                        <label for="lc-file" class="upload-label">
+                            <div class="upload-icon">&#x1F4C4;</div>
+                            <div class="upload-text">
+                                <strong>点击或拖拽上传信用证 (L/C)</strong>
+                                <span>支持 PDF 格式（含扫描件OCR识别）</span>
+                            </div>
+                        </label>
+                        <div class="file-preview" id="lc-preview"></div>
+                    </div>
+
+                    <!-- 交单文件上传区（完整审核模式显示） -->
+                    <div class="docs-upload-area" id="docs-area">
+                        <h3>交单文件（可选）</h3>
+                        <p class="hint-text">根据需要选择单据类型并上传对应文件</p>
+
+                        <div class="doc-slots" id="doc-slots">
+                            <div class="doc-slot" data-type="BL">
+                                <span class="slot-icon">&#x1F6A2;</span>
+                                <span class="slot-name">提单 B/L</span>
+                                <input type="file" name="doc_bl" accept=".pdf" onchange="handleFileSelect(this, 'BL')">
+                                <div class="slot-preview" id="bl-preview"></div>
+                            </div>
+                            <div class="doc-slot" data-type="CI">
+                                <span class="slot-icon">&#x1F4B3;</span>
+                                <span class="slot-name">商业发票 CI</span>
+                                <input type="file" name="doc_ci" accept=".pdf" onchange="handleFileSelect(this, 'CI')">
+                                <div class="slot-preview" id="ci-preview"></div>
+                            </div>
+                            <div class="doc-slot" data-type="PL">
+                                <span class="slot-icon">&#x1F4E6;</span>
+                                <span class="slot-name">装箱单 PL</span>
+                                <input type="file" name="doc_pl" accept=".pdf" onchange="handleFileSelect(this, 'PL')">
+                                <div class="slot-preview" id="pl-preview"></div>
+                            </div>
+                            <div class="doc-slot" data-type="DRAFT">
+                                <span class="slot-icon">&#x1F4C7;</span>
+                                <span class="slot-name">汇票 Draft</span>
+                                <input type="file" name="doc_draft" accept=".pdf" onchange="handleFileSelect(this, 'DRAFT')">
+                                <div class="slot-preview" id="draft-preview"></div>
+                            </div>
+                            <div class="doc-slot" data-type="OTHER">
+                                <span class="slot-icon">&#x1F4C1;</span>
+                                <span class="slot-name">其他单据</span>
+                                <input type="file" name="doc_other" accept=".pdf" multiple onchange="handleFileSelect(this, 'OTHER')">
+                                <div class="slot-preview" id="other-preview"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 提交按钮 -->
+                    <div class="action-bar">
+                        <button type="submit" class="btn-primary" id="submit-btn">
+                            <span class="btn-icon">&#x1F50D;</span> 开始审核
+                        </button>
+                        <button type="reset" class="btn-secondary" onclick="resetForm()">
+                            &#x27F5; 清空重选
+                        </button>
+                    </div>
+                </form>
+            </section>
+
+            <!-- 进度区域 -->
+            <section class="progress-section hidden" id="progress-section">
+                <div class="progress-card">
+                    <h3 id="progress-title">正在处理...</h3>
+                    <div class="progress-bar-container">
+                        <div class="progress-bar" id="progress-bar"></div>
+                    </div>
+                    <div class="progress-steps" id="progress-steps">
+                        <div class="step" data-step="1"><span class="step-num">1</span><span>提取文本</span></div>
+                        <div class="step" data-step="2"><span class="step-num">2</span><span>OCR识别</span></div>
+                        <div class="step" data-step="3"><span class="step-num">3</span><span>分析条款</span></div>
+                        <div class="step" data-step="4"><span class="step-num">4</span><span>交叉核对</span></div>
+                        <div class="step" data-step="5"><span class="step-num">5</span><span>生成报告</span></div>
+                    </div>
+                    <p class="progress-detail" id="progress-detail">请稍候，正在处理您的文件...</p>
+                </div>
+            </section>
+
+            <!-- 结果区域 -->
+            <section class="result-section hidden" id="result-section">
+                <div class="result-header">
+                    <h2>&#x2705; 审核完成</h2>
+                    <div class="result-actions">
+                        <a href="#" class="btn-download" id="download-link" download>
+                            &#x1F4E5; 下载 PDF 报告
+                        </a>
+                        <button class="btn-secondary" onclick="resetForm()">
+                            &#x27F3; 继续审核新文件
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 报告摘要 -->
+                <div class="report-summary" id="report-summary">
+                    <!-- 动态填充 -->
+                </div>
+
+                <!-- 报告详情预览 -->
+                <div class="report-detail" id="report-detail">
+                    <!-- 动态填充 -->
+                </div>
+            </section>
+        </main>
+
+        <!-- 使用说明 -->
+        <section class="help-section" id="how-to-use">
+            <h2>使用说明</h2>
+            <div class="help-cards">
+                <div class="help-card">
+                    <span class="help-num">1</span>
+                    <h3>选择审核模式</h3>
+                    <p>完整审核：上传 L/C + 交单文件 → 交叉核对 + 合规报告<br>仅审条款：只上传 L/C → 条款分析 + 风险提示</p>
+                </div>
+                <div class="help-card">
+                    <span class="help-num">2</span>
+                    <h3>上传文件</h3>
+                    <p>支持 PDF 格式。扫描件会自动进行 OCR 文字识别（准确率约90-95%）。</p>
+                </div>
+                <div class="help-card">
+                    <span class="help-num">3</span>
+                    <h3>获取报告</h3>
+                    <p>点击"开始审核"，等待 10-60 秒后即可下载专业 PDF 审核报告。</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- 页脚 -->
+        <footer class="footer" id="about">
+            <p>LC Audit Web - 基于 lc-audit Skill 构建 | 仅供参考使用，不构成法律或金融建议</p>
+            <p class="footer-note">如有疑问请联系通知行 | 本报告依据 UCP600 规则生成</p>
+        </footer>
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>

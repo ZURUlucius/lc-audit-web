@@ -1,0 +1,51 @@
+# ── Python ─────────────────────
+__pycache__/
+*.py[cod]
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+
+# ── 虚拟环境 ───────────────────
+venv/
+.venv/
+env/
+
+# ── 日志 & 临时文件 ────────────
+server.log
+server_*.log
+server_out.txt
+server_err.txt
+server_log.txt
+LCAuditWeb.xml
+
+# ── 测试文件 ────────────────────
+test_*.py
+_test_*.py
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── 输出（PDF报告等） ──────────
+output/*
+!output/.gitkeep
+reports/*
+
+# ── IDE ────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── OS ─────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── 环境变量 ──────────────────
+.env
+.env.local
+
+# ── 本地启动脚本（云端不需要） ──
+start_server.py
