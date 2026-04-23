@@ -15,30 +15,35 @@ function selectMode(mode) {
 
 // ===== File Selection =====
 function handleFileSelect(input, type) {
-    const file = input.files[0];
-    if (!file) return;
+    const files = input.files;
+    if (!files || files.length === 0) return;
 
     const previewId = type.toLowerCase() + '-preview';
     const previewEl = document.getElementById(previewId);
     if (previewEl) {
-        const sizeStr = formatFileSize(file.size);
-        previewEl.innerHTML =
-            '<span class="file-item">&#x2705; ' +
-            escapeHtml(file.name) + ' (' + sizeStr + ')' +
-            '</span>';
+        let html = '';
+        for (let i = 0; i < files.length; i++) {
+            const file = files[i];
+            const sizeStr = formatFileSize(file.size);
+            const count = files.length > 1 ? ` (${i+1}/${files.length})` : '';
+            html += '<span class="file-item">&#x2705; ' +
+                escapeHtml(file.name) + count + ' (' + sizeStr + ')' +
+                '</span>';
+        }
+        previewEl.innerHTML = html;
     }
 
     // Mark parent slot as has-file
     const slot = input.closest('.doc-slot');
     if (slot) slot.classList.add('has-file');
 
-    // For LC zone, update the preview
+    // For LC zone, update the preview (single file)
     if (type === 'lc') {
         const lcPreview = document.getElementById('lc-preview');
-        if (lcPreview && file) {
+        if (lcPreview && files[0]) {
             lcPreview.innerHTML =
                 '<span class="file-item">&#x2705; ' +
-                escapeHtml(file.name) + ' (' + formatFileSize(file.size) + ')' +
+                escapeHtml(files[0].name) + ' (' + formatFileSize(files[0].size) + ')' +
                 '</span>';
         }
     }
@@ -95,8 +100,8 @@ function submitFiles() {
     const lcFile = document.getElementById('lc-file').files[0];
     formData.append('lc_file', lcFile);
 
-    // Add doc files
-    const docTypes = ['bl', 'ci', 'pl', 'draft', 'other'];
+    // Add doc files (all support multiple files)
+    const docTypes = ['bl', 'ci', 'pl', 'draft', 'fta', 'other'];
     docTypes.forEach(type => {
         const input = document.querySelector('[name="doc_' + type + '"]');
         if (input && input.files.length > 0) {

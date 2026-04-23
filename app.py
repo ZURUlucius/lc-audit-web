@@ -155,6 +155,7 @@ def api_audit():
             "doc_ci": ("CI", "Commercial Invoice"),
             "doc_pl": ("PL", "Packing List"),
             "doc_draft": ("DRAFT", "Draft"),
+            "doc_fta": ("FTA", "Certificate of Origin / FTA"),
             "doc_other": ("OTHER", "Other Document"),
         }
 

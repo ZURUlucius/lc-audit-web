@@ -67,26 +67,32 @@
                             <div class="doc-slot" data-type="BL">
                                 <span class="slot-icon">&#x1F6A2;</span>
                                 <span class="slot-name">提单 B/L</span>
-                                <input type="file" name="doc_bl" accept=".pdf" onchange="handleFileSelect(this, 'BL')">
+                                <input type="file" name="doc_bl" accept=".pdf" multiple onchange="handleFileSelect(this, 'BL')">
                                 <div class="slot-preview" id="bl-preview"></div>
                             </div>
                             <div class="doc-slot" data-type="CI">
                                 <span class="slot-icon">&#x1F4B3;</span>
                                 <span class="slot-name">商业发票 CI</span>
-                                <input type="file" name="doc_ci" accept=".pdf" onchange="handleFileSelect(this, 'CI')">
+                                <input type="file" name="doc_ci" accept=".pdf" multiple onchange="handleFileSelect(this, 'CI')">
                                 <div class="slot-preview" id="ci-preview"></div>
                             </div>
                             <div class="doc-slot" data-type="PL">
                                 <span class="slot-icon">&#x1F4E6;</span>
                                 <span class="slot-name">装箱单 PL</span>
-                                <input type="file" name="doc_pl" accept=".pdf" onchange="handleFileSelect(this, 'PL')">
+                                <input type="file" name="doc_pl" accept=".pdf" multiple onchange="handleFileSelect(this, 'PL')">
                                 <div class="slot-preview" id="pl-preview"></div>
                             </div>
                             <div class="doc-slot" data-type="DRAFT">
                                 <span class="slot-icon">&#x1F4C7;</span>
                                 <span class="slot-name">汇票 Draft</span>
-                                <input type="file" name="doc_draft" accept=".pdf" onchange="handleFileSelect(this, 'DRAFT')">
+                                <input type="file" name="doc_draft" accept=".pdf" multiple onchange="handleFileSelect(this, 'DRAFT')">
                                 <div class="slot-preview" id="draft-preview"></div>
+                            </div>
+                            <div class="doc-slot" data-type="FTA">
+                                <span class="slot-icon">&#x1F4ED;</span>
+                                <span class="slot-name">原产地证 FTA/CO</span>
+                                <input type="file" name="doc_fta" accept=".pdf" multiple onchange="handleFileSelect(this, 'FTA')">
+                                <div class="slot-preview" id="fta-preview"></div>
                             </div>
                             <div class="doc-slot" data-type="OTHER">
                                 <span class="slot-icon">&#x1F4C1;</span>
