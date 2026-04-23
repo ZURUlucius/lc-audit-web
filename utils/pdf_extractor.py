@@ -287,6 +287,7 @@ def _try_ocr_rapidocr(pdf_path, result_dict):
     
     try:
         import pypdfium2 as pdfium
+        import numpy as np
         from PIL import Image
         from rapidocr_onnxruntime import RapidOCR
         
@@ -308,11 +309,15 @@ def _try_ocr_rapidocr(pdf_path, result_dict):
             img = bitmap.to_pil()
             
             if img:
-                # 确保图片是 RGB 模式（RapidOCR 最稳定）
+                # 确保图片是 RGB 模式
                 if img.mode != 'RGB':
                     img = img.convert('RGB')
                 
-                ocr_result, _ = ocr(img)
+                # 【关键】新版 rapidocr-onnxruntime >= 1.3 不再接受 PIL.Image，
+                # 必须转换为 numpy ndarray
+                img_array = np.array(img)
+                
+                ocr_result, _ = ocr(img_array)
                 if ocr_result and len(ocr_result) > 0:
                     page_text = "\n".join([line[1] for line in ocr_result if line and len(line) > 1])
                     if page_text.strip():
@@ -325,7 +330,8 @@ def _try_ocr_rapidocr(pdf_path, result_dict):
                         for rotation in [90, 270, 180]:
                             try:
                                 rotated = img.rotate(rotation, expand=True)
-                                rot_result, _ = ocr(rotated)
+                                rot_array = np.array(rotated)
+                                rot_result, _ = ocr(rot_array)
                                 if rot_result and len(rot_result) > current_lines:
                                     page_text = "\n".join([line[1] for line in rot_result if line and len(line) > 1])
                                     if all_text:
@@ -363,6 +369,7 @@ def _try_pymupdf_ocr(pdf_path):
         import fitz
         from PIL import Image as PILImage
         import io
+        import numpy as np
         from rapidocr_onnxruntime import RapidOCR
         
         ocr = RapidOCR()
@@ -378,7 +385,10 @@ def _try_pymupdf_ocr(pdf_path):
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            ocr_result, _ = ocr(img)
+            # 【关键】新版 rapidocr-onnxruntime >= 1.3 需要 numpy ndarray
+            img_array = np.array(img)
+            
+            ocr_result, _ = ocr(img_array)
             if ocr_result:
                 page_text = "\n".join([line[1] for line in ocr_result if line and len(line) > 1])
                 if page_text.strip():
