@@ -169,19 +169,46 @@ def make_styles():
     return S
 
 
-def tag_cell(text, bg=C.BLUE, text_color=C.WHITE):
-    """带背景色的标签单元格（使用Table wrapper确保背景色正确渲染）"""
+def tag_cell(text, bg=C.BLUE, text_color=C.WHITE, width=None):
+    """
+    带背景色的标签单元格（使用Table wrapper确保背景色正确渲染）。
+
+    参数:
+        text      — 显示文字（如 "PASS", "FAIL", "WARN"）
+        bg        — 背景色 hex 字符串
+        text_color — 文字颜色 hex 字符串（当前通过 ParagraphStyle textColor 设置）
+        width     — 单元格宽度（mm 单位，如 14*mm）；
+                    None = 自动根据文本长度估算（不超过 28mm）
+                    传入具体宽度时严格使用该值，避免与外层表格列宽冲突。
+    """
     styles = make_styles()
-    inner = Paragraph(str(text), styles["clause_tag"])
-    tbl = Table([[inner]], colWidths=[26*mm])
+    tag_style = ParagraphStyle(
+        "tag_inner",
+        fontName=FONT,
+        fontSize=8,
+        leading=11,
+        textColor=hex_color(text_color),
+        alignment=TA_CENTER,
+        wordWrap="CJK",
+    )
+    inner = Paragraph(str(text), tag_style)
+    # 列宽计算：外部明确传入时优先使用，否则按文字长度自动估算
+    if width is None:
+        char_count = len(str(text))
+        # 每个字符约 4.5pt，但至少 12mm，最多 28mm
+        estimated = max(12 * mm, min(28 * mm, char_count * 4.5 + 8))
+        col_w = estimated
+    else:
+        col_w = width
+    tbl = Table([[inner]], colWidths=[col_w])
     tbl.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, -1), hex_color(bg)),
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ("LEFTPADDING", (0, 0), (-1, -1), 4),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
     ]))
     return tbl
 
@@ -244,7 +271,7 @@ def risk_table(anomalies):
         clause = a.get("clause_ref", a.get("条款号", "-"))
 
         rows.append([
-            tag_cell(sev_label, bd_col, C.WHITE),
+            tag_cell(sev_label, bd_col, C.WHITE, width=22*mm),
             Paragraph(atype, styles[style_name]),
             Paragraph(_esc(detail), styles["body"]),
             Paragraph(clause, styles["tc"]),
@@ -1354,7 +1381,9 @@ def _render_single_doc_card(story, S, doc_fields, seq_no, cond_47a, clauses=None
         # 判断是否为提单相关特殊要求
         is_bl = type_en and any(kw in type_en.upper() for kw in ['BILL OF LADING', 'B/L', 'TRANSPORT DOCUMENT'])
         tag_color = C.AMBER_BD if is_bl else C.BLUE
-        special_tags.append(tag_cell(sr, tag_color, C.WHITE))
+        # 62mm 列中最多放 3 个标签，单个最多 20mm
+        tag_w = min(20*mm, max(12*mm, len(str(sr)) * 4.5 + 6))
+        special_tags.append(tag_cell(sr, tag_color, C.WHITE, width=tag_w))
     special_display = special_tags if special_tags else [Paragraph("<i>-</i>", S["small"])]
 
     field_rows.append([
@@ -1368,9 +1397,11 @@ def _render_single_doc_card(story, S, doc_fields, seq_no, cond_47a, clauses=None
         # 多标签时用换行连接
         is_bl = type_en and any(kw in type_en.upper() for kw in ['BILL OF LADING', 'B/L', 'TRANSPORT DOCUMENT'])
         tag_color = C.AMBER_BD if is_bl else C.BLUE
+        # 每个标签最多 18mm，总宽度不超过 62mm
+        per_w = min(18*mm, max(10*mm, 62*mm // max(len(special_req), 1)))
         field_rows[-1][2] = Table(
-            [[tag_cell(sr, tag_color, C.WHITE) for sr in special_req]],
-            colWidths=[None] * len(special_req)
+            [[tag_cell(sr, tag_color, C.WHITE, width=per_w) for sr in special_req]],
+            colWidths=[per_w] * len(special_req)
         )
         field_rows[-1][2].setStyle(TableStyle([
             ("ALIGN", (0, 0), (-1, -1), "LEFT"),
@@ -1914,7 +1945,7 @@ def _render_anomaly_table(story, S, anomalies, clauses=None):
         is_critical_or_high = sev_raw in ("critical", "high")
 
         # Col 1: 异常类型标签
-        col1 = tag_cell(type_label, bd_col, C.WHITE)
+        col1 = tag_cell(type_label, bd_col, C.WHITE, width=19*mm)
 
         # Col 2: 涉及字段/条款号
         fields_val = a.get("fields", a.get("clause_ref", "-"))
@@ -2801,7 +2832,7 @@ def _render_risk_matrix_table(story, S, risk_items):
         # Col 2: 严重度标签
         sev = ri.get("severity", "low")
         sev_cfg = RISK_SEVERITY_CONFIG.get(sev, RISK_SEVERITY_CONFIG["low"])
-        col2 = tag_cell(sev_cfg["label"], sev_cfg["bd"], C.WHITE)
+        col2 = tag_cell(sev_cfg["label"], sev_cfg["bd"], C.WHITE, width=14*mm)
 
         # Col 3: 来源SWIFT字段号
         fields_val = ri.get("fields", "-")
@@ -3397,7 +3428,7 @@ def _build_chapter7_checklist(story, S, analysis, clauses):
             Paragraph(_esc(cat_text), S["small"]),
             Paragraph(_esc(req_text), S["bl"]),
             Paragraph(_esc(item.get("clause_ref", "-")), S["tc"]),
-            tag_cell(tag, bd_col, C.WHITE),
+            tag_cell(tag, bd_col, C.WHITE, width=28*mm),
         ])
 
     # A4 可用宽度 174mm; 分配: 序号10 | 类别28 | 要求92 | 依据16 | 重要28 = 174mm
@@ -3735,7 +3766,7 @@ def generate_compliance_report(lc_analysis, checks, summary, doc_labels, output_
 
                 rows.append([
                     Paragraph(_esc(chk.get("check_item", "")), S["body"]),
-                    tag_cell(txt, bd, C.WHITE),
+                    tag_cell(txt, bd, C.WHITE, width=16*mm),
                     Paragraph(_esc(chk.get("detail", "")), S["bl"]),
                     Paragraph(_esc(chk.get("suggestion", "")), S["small"]),
                 ])
@@ -3773,7 +3804,7 @@ def generate_compliance_report(lc_analysis, checks, summary, doc_labels, output_
                 Paragraph(_esc(tc.get("check", "")), S["body"]),
                 Paragraph(_esc(tc.get("detail", "")), S["tc"]),
                 Paragraph("", S["tc"]),
-                tag_cell(rt, rc, C.WHITE),
+                tag_cell(rt, rc, C.WHITE, width=24*mm),
             ])
         tc_table = Table(tc_rows, colWidths=[40*mm, 45*mm, 45*mm, 24*mm])
         tc_table.setStyle(TableStyle([

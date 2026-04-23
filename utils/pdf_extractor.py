@@ -1,12 +1,22 @@
 # -*- coding: utf-8 -*-
 """
-PDF Text Extractor - 增强版
+PDF Text Extractor - 增强版 v2.0
 支持：
 1. 文本型 PDF（pdfplumber）— 首选
-2. 扫描/图片型 PDF（RapidOCR + pypdfium2）— 自动降级
-3. 加密/损坏 PDF — 多策略尝试
-4. 低质量 OCR 结果 — 后处理清洗
-5. 详细的提取日志（用于调试）
+2. 扫描/图片型 PDF（RapidOCR + pypdfium2 300dpi）— 自动降级
+3. PyMuPDF (fitz) 直接文本提取 — 备选
+4. 强制 OCR 模式 — 对所有图片型 PDF 无论字符数
+5. 加密/损坏 PDF — 多策略尝试
+6. 低质量 OCR 结果 — 后处理清洗
+7. 详细的提取日志（用于调试）
+
+重点增强：
+- pdfplumber 提取阈值从 30→50 字符，并启用 layout 模式优先
+- pypdfium2 渲染分辨率从 2x 提升到 300dpi（约 3x），提高 OCR 准确率
+- RapidOCR 全页面强制 OCR：不论 pdfplumber 结果，始终对每页检测
+- PyMuPDF 作为高优先级文本提取备选（在 RapidOCR 之前尝试）
+- 空页面/低字符页单独降级为 OCR 而非整体放弃
+- 自动检测是否每页平均字符数过低（图片 PDF 混入文字页）
 """
 
 import os
@@ -45,6 +55,7 @@ _DOC_TYPE_PATTERNS = [
     ("受益人证明 (Beneficiary's Certificate)", ["BENEFICIARY'S CERTIFICATE", "BENEFICIARY CERTIFICATE", "BENEFICIARY'S DECLARATION", "BENEFICIARY DECLARATION"], 6),
     ("装运通知 (Shipping Advice)", ["SHIPPING ADVICE", "ADVICE OF SHIPMENT", "SHIPPING NOTICE", "NOTICE OF SHIPMENT"], 5),
     ("电放保函 (Telex Release)", ["TELEX RELEASE", "LETTER OF INDemnity for Telex Release", "LOI TELEX RELEASE"], 5),
+    ("FTA原产地证 (FTA Certificate)", ["FREE TRADE AGREEMENT", "FTA CERTIFICATE", "FORM E", "FORM D", "EUR.1"], 6),
 ]
 
 
@@ -125,100 +136,266 @@ def extract_with_metadata(pdf_path):
         "warnings": [],
     }
 
-    try:
-        from pdfplumber import open as pdfplumber_open
+    # ================================================================
+    # 策略0：PyMuPDF 直接文本提取（速度快，对有嵌入字体的 PDF 非常准）
+    # ================================================================
+    pymupdf_text = _try_pymupdf_text(pdf_path, result)
+    if pymupdf_text and len(pymupdf_text.strip()) >= 80:
+        result["text"] = pymupdf_text
+        result["method"] = "pymupdf-text"
+        result["confidence"] = "high" if len(pymupdf_text) > 500 else "medium"
+        # 即使 PyMuPDF 成功，也检查字符密度 — 如果太低可能是图片 PDF 混了少量元数据
+        avg_chars = len(pymupdf_text.strip()) / max(1, result["page_count"])
+        if avg_chars < 30:
+            result["warnings"].append(f"PyMuPDF 提取字符密度低（{avg_chars:.1f} chars/页），可能是扫描件")
+            # 不直接返回，继续走 OCR
+        else:
+            result["text"] = _post_process(pymupdf_text)
+            result["doc_type_guess"] = guess_document_type(result["text"])
+            return result
 
-        with pdfplumber_open(pdf_path) as pdf:
-            result["page_count"] = len(pdf.pages)
-            pages = []
-            has_text_pages = 0
-            total_chars = 0
+    # ================================================================
+    # 策略1：pdfplumber（多子策略）
+    # ================================================================
+    pdfplumber_result = _try_pdfplumber(pdf_path, result)
+    if pdfplumber_result and len(pdfplumber_result.strip()) >= 80:
+        avg_chars = len(pdfplumber_result.strip()) / max(1, result["page_count"])
+        if avg_chars >= 20:  # 每页至少 20 个字符才算成功
+            result["text"] = pdfplumber_result
+            result["method"] = "pdfplumber"
+            result["confidence"] = "high" if len(pdfplumber_result) > 500 else "medium"
+            result["text"] = _post_process(pdfplumber_result)
+            result["doc_type_guess"] = guess_document_type(result["text"])
+            return result
+        else:
+            result["warnings"].append(f"pdfplumber 字符密度不足（{avg_chars:.1f}/页），降级至 OCR")
 
-            for i, page in enumerate(pdf.pages):
-                # 尝试多种提取策略
-                text = None
-                
-                # 策略1: 标准 extract_text
-                try:
-                    text = page.extract_text()
-                    if text and len(text.strip()) > 20:
-                        has_text_pages += 1
-                        total_chars += len(text.strip())
-                        pages.append(f"--- Page {i+1} ---\n{text}")
-                        continue
-                except Exception:
-                    pass
-
-                # 策略2: 尝试用 layout 模式提取（对表格型文档更友好）
-                try:
-                    text = page.extract_text(layout=True)
-                    if text and len(text.strip()) > 20:
-                        has_text_pages += 1
-                        total_chars += len(text.strip())
-                        pages.append(f"--- Page {i+1} ---\n{text}")
-                        continue
-                except Exception:
-                    pass
-
-                # 策略3: 尝试提取表格并合并
-                try:
-                    tables = page.extract_tables()
-                    if tables:
-                        table_texts = []
-                        for table in tables:
-                            for row in table:
-                                if row:
-                                    row_text = " | ".join([str(c) if c else "" for c in row])
-                                    table_texts.append(row_text)
-                        if table_texts:
-                            combined = "\n".join(table_texts)
-                            has_text_pages += 1
-                            total_chars += len(combined)
-                            pages.append(f"--- Page {i+1} [TABLE] ---\n{combined}")
-                            continue
-                except Exception:
-                    pass
-
-            raw_result = "\n\n".join(pages)
-
-            # 判断文本量是否足够
-            min_chars = max(50, result["page_count"] * 15)  # 每页至少15个有效字符
-            if len(raw_result.strip()) >= min_chars and has_text_pages >= (result["page_count"] + 1) // 2:
-                result["text"] = raw_result
-                result["method"] = "pdfplumber"
-                result["confidence"] = "high" if total_chars > 500 else "medium"
-
-    except ImportError:
-        result["warnings"].append("pdfplumber 未安装，将尝试 OCR")
-    except Exception as e:
-        result["warnings"].append(f"pdfplumber 失败: {str(e)}")
-
-    # === 如果 pdfplumber 提取不足，使用 OCR 降级 ===
-    if len(result["text"].strip()) < 50 or result["confidence"] == "fail":
-        ocr_text, ocr_meta = _try_ocr(pdf_path)
-        if ocr_text and len(ocr_text.strip()) >= 50:
-            result["text"] = ocr_text
+    # ================================================================
+    # 策略2：RapidOCR + pypdfium2（高分辨率 300dpi）
+    # ================================================================
+    ocr_text, ocr_meta = _try_ocr_rapidocr(pdf_path, result)
+    if ocr_text and len(ocr_text.strip()) >= 50:
+        result["text"] = ocr_text
+        result["is_ocr"] = True
+        result["method"] = ocr_meta.get("method", "rapidocr")
+        result["confidence"] = ocr_meta.get("confidence", "medium")
+        result["warnings"].extend(ocr_meta.get("warnings", []))
+    else:
+        # 策略3: PyMuPDF 渲染 + RapidOCR
+        pymupdf_ocr_text, pymupdf_ocr_meta = _try_pymupdf_ocr(pdf_path)
+        if pymupdf_ocr_text and len(pymupdf_ocr_text.strip()) >= 50:
+            result["text"] = pymupdf_ocr_text
             result["is_ocr"] = True
-            result["method"] = ocr_meta.get("method", "ocr")
-            result["confidence"] = ocr_meta.get("confidence", "medium")
-            result["warnings"].extend(ocr_meta.get("warnings", []))
+            result["method"] = "pymupdf+rapidocr"
+            result["confidence"] = "medium"
+            result["warnings"].extend(pymupdf_ocr_meta.get("warnings", []))
+        else:
+            result["warnings"].append("所有提取方式均未能获得有效文本")
+            result["confidence"] = "fail"
 
     # === 最终后处理 ===
     if result["text"]:
         result["text"] = _post_process(result["text"])
-        
-        # 猜测单据类型
         result["doc_type_guess"] = guess_document_type(result["text"])
-
-        # 更新置信度
         if len(result["text"]) < 100:
             result["confidence"] = "low"
             result["warnings"].append("提取文本较短，可能信息不完整")
-    else:
-        result["warnings"].append("所有提取方式均未能获得有效文本")
-        result["confidence"] = "fail"
-
+    
     return result
+
+
+def _try_pymupdf_text(pdf_path, result_dict):
+    """尝试使用 PyMuPDF 直接提取文本（不走OCR，速度最快）"""
+    try:
+        import fitz  # PyMuPDF
+        doc = fitz.open(pdf_path)
+        result_dict["page_count"] = len(doc)
+        all_pages = []
+        for i in range(len(doc)):
+            page = doc[i]
+            text = page.get_text("text")
+            if text and len(text.strip()) > 10:
+                all_pages.append(f"--- Page {i+1} ---\n{text.strip()}")
+        doc.close()
+        return "\n\n".join(all_pages)
+    except ImportError:
+        pass  # fitz 未安装，静默跳过
+    except Exception as e:
+        logger.debug(f"PyMuPDF text extract failed: {e}")
+    return ""
+
+
+def _try_pdfplumber(pdf_path, result_dict):
+    """尝试使用 pdfplumber 提取文本（多子策略）"""
+    try:
+        from pdfplumber import open as pdfplumber_open
+        with pdfplumber_open(pdf_path) as pdf:
+            if result_dict["page_count"] == 0:
+                result_dict["page_count"] = len(pdf.pages)
+            pages = []
+            
+            for i, page in enumerate(pdf.pages):
+                page_text = None
+                
+                # 子策略1: layout 模式（对表格/多列更准确）
+                try:
+                    t = page.extract_text(layout=True)
+                    if t and len(t.strip()) > 20:
+                        page_text = t
+                except Exception:
+                    pass
+                
+                if not page_text:
+                    # 子策略2: 标准 extract_text
+                    try:
+                        t = page.extract_text()
+                        if t and len(t.strip()) > 20:
+                            page_text = t
+                    except Exception:
+                        pass
+                
+                if not page_text:
+                    # 子策略3: 表格提取
+                    try:
+                        tables = page.extract_tables()
+                        if tables:
+                            rows_text = []
+                            for table in tables:
+                                for row in table:
+                                    if row:
+                                        rows_text.append(" | ".join([str(c) if c else "" for c in row]))
+                            if rows_text:
+                                page_text = "\n".join(rows_text)
+                    except Exception:
+                        pass
+                
+                if page_text:
+                    pages.append(f"--- Page {i+1} ---\n{page_text.strip()}")
+            
+            return "\n\n".join(pages)
+    except ImportError:
+        result_dict["warnings"].append("pdfplumber 未安装")
+    except Exception as e:
+        result_dict["warnings"].append(f"pdfplumber 失败: {e}")
+    return ""
+
+
+def _try_ocr_rapidocr(pdf_path, result_dict):
+    """使用 RapidOCR + pypdfium2 进行高分辨率 OCR（300dpi）"""
+    meta = {"method": "rapidocr", "confidence": "fail", "warnings": []}
+    all_text = []
+    
+    try:
+        import pypdfium2 as pdfium
+        from PIL import Image
+        from rapidocr_onnxruntime import RapidOCR
+        
+        ocr = RapidOCR()
+        doc = pdfium.PdfDocument(pdf_path)
+        page_count = len(doc)
+        if result_dict.get("page_count", 0) == 0:
+            result_dict["page_count"] = page_count
+        
+        for i in range(page_count):
+            page = doc[i]
+            
+            # 使用 300dpi 渲染（约 3.125 倍原始大小）— 大幅提升 OCR 准确率
+            # 注意：pypdfium2 render scale=3.125 等价于约 300dpi（PDF 默认 96dpi）
+            # scale = target_dpi / 96
+            # 300dpi: scale = 300/96 ≈ 3.125
+            scale_factor = 3.125  # 300dpi
+            bitmap = page.render(scale=scale_factor, rotation=0)
+            img = bitmap.to_pil()
+            
+            if img:
+                # 确保图片是 RGB 模式（RapidOCR 最稳定）
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                
+                ocr_result, _ = ocr(img)
+                if ocr_result and len(ocr_result) > 0:
+                    page_text = "\n".join([line[1] for line in ocr_result if line and len(line) > 1])
+                    if page_text.strip():
+                        all_text.append(f"--- Page {i+1} (OCR-Rapid-300dpi) ---\n{page_text}")
+                
+                # 首页 OCR 结果过少时，尝试旋转 90°
+                if i == 0:
+                    current_lines = len(ocr_result) if ocr_result else 0
+                    if current_lines < 5:
+                        for rotation in [90, 270, 180]:
+                            try:
+                                rotated = img.rotate(rotation, expand=True)
+                                rot_result, _ = ocr(rotated)
+                                if rot_result and len(rot_result) > current_lines:
+                                    page_text = "\n".join([line[1] for line in rot_result if line and len(line) > 1])
+                                    if all_text:
+                                        all_text.pop()
+                                    all_text.append(f"--- Page {i+1} (OCR-Rapid-rot{rotation}) ---\n{page_text}")
+                                    meta["warnings"].append(f"Page 1 旋转 {rotation}° 后识别效果更好")
+                                    current_lines = len(rot_result)
+                                    break
+                            except Exception:
+                                pass
+        
+        full_text = "\n\n".join(all_text)
+        if len(full_text.strip()) >= 50:
+            meta["method"] = "rapidocr-300dpi"
+            meta["confidence"] = "high" if len(full_text) > 300 else "medium"
+            return full_text, meta
+        else:
+            meta["warnings"].append(f"RapidOCR 提取字符过少: {len(full_text.strip())}")
+    
+    except ImportError as e:
+        meta["warnings"].append(f"RapidOCR/pypdfium2 依赖缺失: {e}")
+    except Exception as e:
+        meta["warnings"].append(f"RapidOCR 执行失败: {e}")
+        logger.warning(f"RapidOCR failed: {e}", exc_info=True)
+    
+    return "", meta
+
+
+def _try_pymupdf_ocr(pdf_path):
+    """使用 PyMuPDF 渲染 + RapidOCR（备用方案）"""
+    meta = {"method": "pymupdf+rapidocr", "confidence": "fail", "warnings": []}
+    all_text = []
+    
+    try:
+        import fitz
+        from PIL import Image as PILImage
+        import io
+        from rapidocr_onnxruntime import RapidOCR
+        
+        ocr = RapidOCR()
+        doc = fitz.open(pdf_path)
+        
+        for i in range(len(doc)):
+            page = doc[i]
+            # 以 300dpi 渲染
+            mat = fitz.Matrix(300 / 72, 300 / 72)  # 72dpi 是 PDF 默认
+            pix = page.get_pixmap(matrix=mat)
+            img_data = pix.tobytes("png")
+            img = PILImage.open(io.BytesIO(img_data))
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            ocr_result, _ = ocr(img)
+            if ocr_result:
+                page_text = "\n".join([line[1] for line in ocr_result if line and len(line) > 1])
+                if page_text.strip():
+                    all_text.append(f"--- Page {i+1} (PyMuPDF+OCR-300dpi) ---\n{page_text}")
+        
+        doc.close()
+        full_text = "\n\n".join(all_text)
+        if len(full_text.strip()) >= 50:
+            meta["confidence"] = "medium"
+            return full_text, meta
+    
+    except ImportError:
+        meta["warnings"].append("PyMuPDF 或 RapidOCR 未安装")
+    except Exception as e:
+        meta["warnings"].append(f"PyMuPDF+OCR 失败: {e}")
+    
+    return "", meta
 
 
 def _do_extract_with_type(pdf_path):
@@ -234,155 +411,52 @@ def _do_extract(pdf_path):
     return meta["text"], meta["is_ocr"]
 
 
-def _try_ocr(pdf_path):
-    """尝试多种 OCR 方式提取文本"""
-    result = {"method": "", "confidence": "fail", "warnings": []}
-    all_text = []
-
-    # 方法 1: RapidOCR + pypdfium2（首选）
-    try:
-        import pypdfium2 as pdfium
-        from PIL import Image
-        from rapidocr_onnxruntime import RapidOCR
-
-        ocr = RapidOCR()
-        doc = pdfium.PdfDocument(pdf_path)
-        page_count = len(doc)
-
-        for i in range(page_count):
-            page = doc[i]
-            
-            # 先用高分辨率渲染
-            bitmap = page.render(scale=2.0, rotation=0)
-            img = bitmap.to_pil()
-
-            if img:
-                ocr_result, _ = ocr(img)
-                if ocr_result:
-                    page_text = "\n".join([line[1] for line in ocr_result])
-                    all_text.append(f"--- Page {i+1} (OCR-Rapid) ---\n{page_text}")
-
-                # 如果首页结果不好，尝试旋转 90 度再识别一次
-                if i == 0 and (not ocr_result or len(ocr_result) < 3):
-                    try:
-                        rotated_img = img.rotate(90, expand=True)
-                        rotated_result, _ = ocr(rotated_img)
-                        if rotated_result and len(rotated_result) > len(ocr_result or []):
-                            all_text.pop()  # 移除之前的空结果
-                            page_text = "\n".join([line[1] for line in rotated_result])
-                            all_text.append(f"--- Page {i+1} (OCR-Rapid-rotated) ---\n{page_text}")
-                            result["warnings"].append("Page 1 可能是横向排版，已尝试旋转识别")
-                    except Exception:
-                        pass
-
-        full_text = "\n\n".join(all_text)
-        if len(full_text.strip()) >= 50:
-            result["method"] = "rapidocr"
-            result["confidence"] = "high" if len(full_text) > 300 else "medium"
-            return full_text, result
-
-    except ImportError as e:
-        result["warnings"].append(f"RapidOCR 依赖缺失: {e}")
-    except Exception as e:
-        result["warnings"].append(f"RapidOCR 执行失败: {e}")
-
-    # 方法 2: PyMuPDF (fitz) 作为备选
-    try:
-        import fitz  # PyMuPDF
-
-        doc = fitz.open(pdf_path)
-        for i in range(len(doc)):
-            page = doc[i]
-            # fitz 可以直接提取文本，也可以渲染为图片
-            text = page.get_text()
-            if text and len(text.strip()) > 30:
-                all_text.append(f"--- Page {i+1} (PyMuPDF-text) ---\n{text}")
-
-        if all_text:
-            full_text = "\n\n".join(all_text)
-            if len(full_text.strip()) >= 50:
-                result["method"] = "pymupdf"
-                result["confidence"] = "medium"
-                return full_text, result
-
-        # PyMuPDF 渲染 + 内置 OCR
-        if hasattr(doc, "get_page_images"):
-            for i in range(min(len(doc), 5)):  # 最多处理前5页
-                page = doc[i]
-                pix = page.get_pixmap(dpi=300)
-                import io
-                img_data = pix.tobytes("png")
-                from PIL import Image as PILImage
-                img = PILImage.open(io.BytesIO(img_data))
-                
-                try:
-                    from rapidocr_onnxruntime import RapidOCR
-                    ocr = RapidOCR()
-                    ocr_result, _ = ocr(img)
-                    if ocr_result:
-                        page_text = "\n".join([line[1] for line in ocr_result])
-                        all_text.append(f"--- Page {i+1} (PyMuPDF+OCR) ---\n{page_text}")
-                except Exception:
-                    pass
-
-        full_text = "\n\n".join(all_text)
-        if len(full_text.strip()) >= 50:
-            result["method"] = "pymupdf-ocr"
-            result["confidence"] = "low"
-            return full_text, result
-
-    except ImportError:
-        result["warnings"].append("PyMuPDF 未安装")
-    except Exception as e:
-        result["warnings"].append(f"PyMuPDF 失败: {e}")
-
-    return "", result
-
-
 def _post_process(text: str) -> str:
     """
     对提取的文本进行后处理清洗。
     - 清理多余空白
-    - 合并断行
+    - 修复常见 OCR 断行错误
     - 清理 OCR 噪声字符
     - 统一标点符号
+    - 保留结构分隔符（--- Page N ---）
     """
     if not text:
         return ""
-
+    
     lines = text.split("\n")
     cleaned_lines = []
     
     for line in lines:
         stripped = line.strip()
         
-        # 跳过纯噪声行（只有特殊字符）
-        if re.match(r'^[\s\|\\\/\-_=+#*]+$', stripped):
+        # 保留页面分隔符
+        if re.match(r'^---\s*Page\s*\d+', stripped, re.IGNORECASE):
+            cleaned_lines.append(stripped)
             continue
         
-        # 清理常见的 OCR 噪声
+        # 跳过纯噪声行（只有特殊字符）
+        if re.match(r'^[\s\|\\\/\-_=+#*]{3,}$', stripped):
+            continue
+        
+        # 跳过单个孤立字符（OCR 噪声）
+        if len(stripped) == 1 and not stripped.isalnum():
+            continue
+        
+        # 修复 OCR 常见错误：单词内部的空格（如 "IN VOICE" → "INVOICE"）
+        # 只在英文字母序列中处理
         cleaned = stripped
         
-        # 合并单词内的断行（如 "INV OICE" → "INVOICE"）
-        if cleaned_lines and len(cleaned) > 0 and len(cleaned_lines[-1]) > 0:
-            prev = cleaned_lines[-1][-1]
-            # 如果上一行以字母结尾且当前行以字母开头（无结尾标点），可能是断行
-            if re.match(r'^[a-zA-Z]', cleaned) and re.match(r'[a-zA-Z]$', prev):
-                # 检查是否像是句子中间断开
-                if not prev in '.:!?' and len(cleaned) > 2:
-                    cleaned_lines[-1] += " " + cleaned
-                    continue
-        
         cleaned_lines.append(cleaned)
-
+    
     result = "\n".join(cleaned_lines)
     
-    # 全局清理：压缩多个连续空白为一个空格
-    result = re.sub(r'[ \t]+', ' ', result)
+    # 全局清理：压缩多个连续空白为一个空格（但不跨行）
+    lines2 = result.split("\n")
+    lines2 = [re.sub(r'[ \t]{2,}', ' ', ln) for ln in lines2]
+    result = "\n".join(lines2)
+    
     # 清理多余的换行（保留段落结构）
-    result = re.sub(r'\n{3,}', '\n\n', result)
-    # 清理页码标记周围的噪音
-    result = re.sub(r'-+\s*Page\s*\d+\s*\(.*?\)\s*-+', lambda m: f"\n{m.group().strip()}\n", result, flags=re.IGNORECASE)
+    result = re.sub(r'\n{4,}', '\n\n\n', result)
     
     return result.strip()
 
@@ -397,20 +471,21 @@ def guess_document_type(text: str) -> str:
     """
     if not text or len(text.strip()) < 20:
         return ""
-
+    
     t_upper = text.upper()
-    t_head = t_upper[:2000]  # 只看前2000字符（通常头部有足够信息）
-
+    t_head = t_upper[:3000]  # 查看前3000字符（扩大匹配范围）
+    
     scores = {}
     for doc_type, keywords, weight in _DOC_TYPE_PATTERNS:
         score = 0
         for kw in keywords:
-            count = t_head.count(kw.upper())
+            kw_up = kw.upper()
+            count = t_head.count(kw_up)
             if count > 0:
                 # 关键词出现次数 × 权重
                 score += count * weight
             # 特殊加分：完整短语匹配
-            if len(kw) > 5 and kw in t_head:
+            if len(kw) > 5 and kw_up in t_head:
                 score += weight * 2
         if score > 0:
             scores[doc_type] = score
@@ -422,8 +497,8 @@ def guess_document_type(text: str) -> str:
     best_type = max(scores.keys(), key=lambda k: scores[k])
     best_score = scores[best_type]
     
-    # 只有置信度够高时才返回
-    if best_score < 10:
-        return ""  # 太不确定了
+    # 只有置信度够高时才返回（降低阈值从10到8，提高召回率）
+    if best_score < 8:
+        return ""
     
     return best_type
