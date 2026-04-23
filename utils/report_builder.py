@@ -139,15 +139,15 @@ def make_styles():
     """创建所有样式"""
     S = {}
     # 标题样式
-    S["title"]       = P("title", fontSize=22, leading=28, textColor=hex_color(C.NAVY), alignment=TA_CENTER, spaceAfter=4, fontName=FONT_BOLD)
-    S["subtitle"]    = P("sub", fontSize=13, leading=18, textColor=hex_color(C.GREY), alignment=TA_CENTER, spaceAfter=8)
-    S["h1"]          = P("h1", fontSize=15, leading=20, textColor=hex_color(C.BLUE), spaceBefore=16, spaceAfter=8, fontName=FONT_BOLD)
-    S["h2"]          = P("h2", fontSize=12, leading=16, textColor=hex_color(C.NAVY), spaceBefore=10, spaceAfter=6, fontName=FONT_BOLD)
+    S["title"]       = P("title", fontSize=20, leading=26, textColor=hex_color(C.NAVY), alignment=TA_CENTER, spaceAfter=2, fontName=FONT_BOLD)
+    S["subtitle"]    = P("sub", fontSize=12, leading=16, textColor=hex_color(C.GREY), alignment=TA_CENTER, spaceAfter=4)
+    S["h1"]          = P("h1", fontSize=14, leading=18, textColor=hex_color(C.BLUE), spaceBefore=10, spaceAfter=4, fontName=FONT_BOLD)
+    S["h2"]          = P("h2", fontSize=11, leading=15, textColor=hex_color(C.NAVY), spaceBefore=6, spaceAfter=3, fontName=FONT_BOLD)
 
     # 正文样式
-    S["body"]        = P("body", fontSize=9.5, leading=15, textColor=hex_color(C.DGREY), spaceAfter=4, alignment=TA_JUSTIFY, wordWrap="CJK")
-    S["bl"]          = P("bl", fontSize=9.5, leading=15, textColor=hex_color(C.DGREY), spaceAfter=3, wordWrap="CJK")
-    S["small"]       = P("small", fontSize=8.5, leading=13, textColor=hex_color(C.GREY), spaceAfter=2, wordWrap="CJK")
+    S["body"]        = P("body", fontSize=9, leading=14, textColor=hex_color(C.DGREY), spaceAfter=2, alignment=TA_JUSTIFY, wordWrap="CJK")
+    S["bl"]          = P("bl", fontSize=9, leading=14, textColor=hex_color(C.DGREY), spaceAfter=2, wordWrap="CJK")
+    S["small"]       = P("small", fontSize=8, leading=12, textColor=hex_color(C.GREY), spaceAfter=1, wordWrap="CJK")
     S["label"]       = P("label", fontSize=9, leading=14, textColor=hex_color(C.GREY), wordWrap="CJK")
     S["value"]       = P("value", fontSize=9.5, leading=15, textColor=hex_color(C.DGREY), wordWrap="CJK")
 
@@ -307,6 +307,32 @@ def _esc(s):
     s = s.replace("<", "&lt;")
     s = s.replace(">", "&gt;")
     return s
+
+
+def _clean_lc_colons(text):
+    """清理信用证文本中无意义的 SWIFT 冒号分隔符
+    
+    MT700 报文中使用 ':' 作为字段/子字段分隔符，
+    在报告中显示为连续的 '::::' 或 ': ' 等无意义格式。
+    此函数将多余的冒号清理为可读格式：
+    - '::' 或 ':::' → 换行或空格
+    - 行首/行尾多余冒号去除
+    - 连续空格压缩
+    """
+    if not text:
+        return ""
+    t = str(text)
+    # 多个连续冒号 → 换行（SWIFT 子段分隔）
+    t = re.sub(r':{2,}', '\n', t)
+    # 单独的冒号后跟空格但前面无文字（行首残留）→ 去掉
+    t = re.sub(r'^\s*:\s*', '', t, flags=re.MULTILINE)
+    # 行尾单独冒号 → 去掉
+    t = re.sub(r'\s*:\s*$', '', t, flags=re.MULTILINE)
+    # 多个连续空格 → 单个空格
+    t = re.sub(r'  +', ' ', t)
+    # 多个连续换行 → 最多2个
+    t = re.sub(r'\n{3,}', '\n\n', t)
+    return t.strip()
 
 
 def _fmt_amount(amt_str):
@@ -791,7 +817,7 @@ def _build_key_dates_box(story, S, clauses, analysis):
         lines.append(_bf("溢短装容差: ") + f"+/- {tol_pct}% ({tol_src}), 可接受金额范围: {cur} {lo:,.2f} ~ {cur} {hi:,.2f}")
 
     if lines:
-        story.append(Spacer(1, 4*mm))
+        story.append(Spacer(1, 2*mm))
         story.append(Paragraph(_bf("关键时间节点与运输参数"), S["h2"]))
         content = Paragraph("<br/>".join(lines), S["body"])
         story.append(box_para(content, C.LIGHT_BLUE, C.BLUE))
@@ -833,7 +859,7 @@ def _build_chapter2_goods_desc(story, S, analysis, clauses):
     story.append(box_para(Paragraph(_esc(display), S["body"]), C.WHITE, C.BORDER))
 
     # 货描一致性备注
-    story.append(Spacer(1, 3*mm))
+    story.append(Spacer(1, 2*mm))
     story.append(note_box(
         "[i] 货物描述核对提醒",
         "商业发票和装箱单中的品名、规格、数量、单价、金额必须与45A货描完全一致。"
@@ -1322,23 +1348,28 @@ def _render_single_doc_card(story, S, doc_fields, seq_no, cond_47a, clauses=None
         Paragraph("<b>特殊要求 (Special Requirements)</b>", S["th"]),
     ]]
 
-    # 格式化特殊要求标签
+    # 格式化特殊要求标签 — 提单(B/L)相关用黄色标签，其他用蓝色
     special_tags = []
     for sr in special_req:
-        special_tags.append(tag_cell(sr, C.BLUE, C.WHITE))
+        # 判断是否为提单相关特殊要求
+        is_bl = type_en and any(kw in type_en.upper() for kw in ['BILL OF LADING', 'B/L', 'TRANSPORT DOCUMENT'])
+        tag_color = C.AMBER_BD if is_bl else C.BLUE
+        special_tags.append(tag_cell(sr, tag_color, C.WHITE))
     special_display = special_tags if special_tags else [Paragraph("<i>-</i>", S["small"])]
 
     field_rows.append([
         Paragraph(_esc(copies), S["bl"]),
-        Paragraph(_esc(header[:150]) if len(header) > 150 else _esc(header), S["bl"]),
+        Paragraph(_esc(header[:200]) if len(header) > 200 else _esc(header), S["bl"]),
         special_display[0] if len(special_display) == 1 else special_display,
     ])
 
     # 处理特殊要求多标签情况
     if len(special_req) > 1:
         # 多标签时用换行连接
+        is_bl = type_en and any(kw in type_en.upper() for kw in ['BILL OF LADING', 'B/L', 'TRANSPORT DOCUMENT'])
+        tag_color = C.AMBER_BD if is_bl else C.BLUE
         field_rows[-1][2] = Table(
-            [[tag_cell(sr, C.BLUE, C.WHITE) for sr in special_req]],
+            [[tag_cell(sr, tag_color, C.WHITE) for sr in special_req]],
             colWidths=[None] * len(special_req)
         )
         field_rows[-1][2].setStyle(TableStyle([
@@ -1362,7 +1393,7 @@ def _render_single_doc_card(story, S, doc_fields, seq_no, cond_47a, clauses=None
         ("RIGHTPADDING", (0, 0), (-1, -1), 4),
     ]))
     story.append(field_table)
-    story.append(Spacer(1, 2*mm))
+    story.append(Spacer(1, 1.5*mm))
 
     # ===== 第三段：详细条款原文 =====
     # 如果有拆分的详细项，先展示简要列表，再展示完整原文
@@ -1378,19 +1409,20 @@ def _render_single_doc_card(story, S, doc_fields, seq_no, cond_47a, clauses=None
             ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
         ]))
         story.append(detail_table)
-        story.append(Spacer(1, 1.5*mm))
+        story.append(Spacer(1, 1*mm))
 
-    # 完整原文框
+    # 完整原文框（清理无意义冒号分隔符）
     story.append(Paragraph("<font size=8 color='#6B7280'>[条款原文]</font>", S["small"]))
-    story.append(box_para(Paragraph(_esc(raw_content), S["body"]), C.WHITE, C.BORDER))
+    clean_raw = _clean_lc_colons(raw_content)
+    story.append(box_para(Paragraph(_esc(clean_raw), S["body"]), C.WHITE, C.BORDER))
 
     # ===== 第四段：47A附加要求汇总 =====
     notes_47a = _doc_47a_notes(doc_fields, cond_47a)
     if notes_47a:
-        story.append(Spacer(1, 2*mm))
-        # 显示最相关的3条
-        shown = notes_47a[:3]
-        count_badge = f" ({len(notes_47a)} 条关联)" if len(notes_47a) > 3 else ""
+        story.append(Spacer(1, 1.5*mm))
+        # 显示所有关联条目（不再限制为3条）
+        shown = notes_47a
+        count_badge = f" ({len(notes_47a)} 条关联)" if len(notes_47a) > 1 else ""
         story.append(Paragraph(
             f"<font color='#D97706'><b>[!] 47A 附加要求汇总{count_badge}</b></font>", S["h2"]
         ))
@@ -1412,16 +1444,16 @@ def _render_single_doc_card(story, S, doc_fields, seq_no, cond_47a, clauses=None
                 f"<br/>{_esc(snippet)}"
             )
             # 直接用 note_box 展示
-            story.append(note_box(label, snippet, "warning"))
-            story.append(Spacer(1, 1.5*mm))
+            clean_snippet = _clean_lc_colons(snippet)
+            story.append(note_box(label, clean_snippet, "warning"))
+            story.append(Spacer(1, 1*mm))
 
     # 单据间间隔
-    story.append(Spacer(1, 4*mm))
+    story.append(Spacer(1, 2*mm))
 
 
 def _render_draft_section(story, S, needs_draft, draft_reasons, clauses):
     """渲染汇票专项说明区块"""
-    story.append(PageBreak())  # 汇票部分另起一页
     story.append(Paragraph("汇票专项说明 (Draft/Bill of Exchange)", S["h2"]))
 
     if needs_draft:
@@ -1464,10 +1496,17 @@ def _render_draft_section(story, S, needs_draft, draft_reasons, clauses):
         ]))
         story.append(draft_table)
 
-        story.append(Spacer(1, 3*mm))
+        story.append(Spacer(1, 2*mm))
+        # 清理 draft_reasons 中可能残留的 HTML/格式乱码
+        clean_reasons = []
+        for dr in draft_reasons:
+            cr = re.sub(r'</?(?:br|b|i|font|/?[^>]+)>', '', str(dr))
+            cr = re.sub(r'\s+', ' ', cr).strip()
+            if cr:
+                clean_reasons.append(cr)
         story.append(note_box(
             "[!] 需要提交汇票",
-            "<br/>".join(draft_reasons) +
+            "<br/>".join(clean_reasons) +
             "<br/><br/>"
             "<b>制单核心检查清单：</b><br/>"
             "• 汇票金额不得超过信用证金额<br/>"
@@ -1482,7 +1521,7 @@ def _render_draft_section(story, S, needs_draft, draft_reasons, clauses):
         story.append(note_box(
             "[OK] 本信用证未要求提交汇票",
             "根据条款分析（42C/42A/42M + 46A/47A综合判断），本信用证没有明确要求提交汇票(draft/bill of exchange)。<br/><br/>"
-            "<i>注意：如果付款方式为承兑或议付，即使未明确列明汇票条款，银行也可能要求提供汇票。建议与通知行确认。</i>",
+            "注意：如果付款方式为承兑或议付，即使未明确列明汇票条款，银行也可能要求提供汇票。建议与通知行确认。",
             "success"
         ))
 
@@ -1765,7 +1804,7 @@ def _build_chapter5_anomaly_review(story, S, analysis, clauses, anomalies):
 
     # ---- 统计概览面板 ----
     _render_anomaly_stats_panel(story, S, all_anomalies)
-    story.append(Spacer(1, 4*mm))
+    story.append(Spacer(1, 2*mm))
 
     # ---- 按 severity 排序：critical → high → medium → low ----
     def _sort_key(a):
@@ -1898,22 +1937,22 @@ def _render_anomaly_table(story, S, anomalies, clauses=None):
 
     # ---- 表格样式 ----
     # A4 可用宽度 = 210mm - 18mm*2(margin) = 174mm
-    # 分配: 类型22 | 字段16 | 摘录44 | 问题44 | 剩余48 → 总计174mm
-    col_widths = [20*mm, 15*mm, 43*mm, 43*mm, 33*mm]
+    # 分配: 类型20 | 字段15 | 摘录46 | 问题48 | 剩余45 → 总计174mm
+    col_widths = [19*mm, 14*mm, 45*mm, 47*mm, 39*mm]
 
     t = Table(rows, colWidths=col_widths)
 
-    # 基础样式
+    # 基础样式 — 紧凑型padding防止颜色区域溢出
     base_style = [
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("BACKGROUND", (0, 0), (-1, 0), hex_color(C.NAVY)),
         ("TEXTCOLOR", (0, 0), (-1, 0), hex_color(C.WHITE)),
-        ("BOX", (0, 0), (-1, -1), 0.6, hex_color(C.NAVY)),
+        ("BOX", (0, 0), (-1, -1), 0.5, hex_color(C.NAVY)),
         ("INNERGRID", (0, 0), (-1, -1), 0.25, hex_color(C.BORDER)),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-        ("LEFTPADDING", (0, 0), (-1, -1), 3),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("LEFTPADDING", (0, 0), (-1, -1), 2),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 2),
     ]
 
     # 斑马纹 + 高危行特殊背景
@@ -2039,8 +2078,8 @@ def _render_action_summary(story, S, anomalies):
     if not critical_items:
         return
 
-    story.append(Spacer(1, 6*mm))
-    story.append(Paragraph(_bf("🔴 必须在发货前处理的异常项:"), S["h2"]))
+    story.append(Spacer(1, 3*mm))
+    story.append(Paragraph(_bf("[!] 必须在发货前处理的异常项:"), S["h2"]))
 
     for i, item in enumerate(critical_items):
         desc = (item.get("description", "") or item.get("detail", ""))[:200]
@@ -2658,7 +2697,7 @@ def _build_chapter6_risk_matrix(story, S, analysis, clauses, anomalies):
 
     # ---- 综合风险统计面板 ----
     _render_risk_stats_panel(story, S, risk_items)
-    story.append(Spacer(1, 4*mm))
+    story.append(Spacer(1, 2*mm))
 
     # ---- 按 severity + score 降序排列 ----
     def _risk_sort_key(ri):
@@ -2780,20 +2819,20 @@ def _render_risk_matrix_table(story, S, risk_items):
         rows.append(row_data)
 
     # 表格样式
-    # A4 可用宽度 = 174mm; 分配: 风险项目38 | 严重度16 | 来源18 | 说明102 = 174mm
-    col_widths = [36*mm, 15*mm, 17*mm, 86*mm]
+    # A4 可用宽度 = 174mm; 分配: 风险项目36 | 严重度15 | 来源17 | 剩余106 = 174mm
+    col_widths = [34*mm, 14*mm, 16*mm, 100*mm]
     t = Table(rows, colWidths=col_widths)
 
     base_style = [
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("BACKGROUND", (0, 0), (-1, 0), hex_color(C.NAVY)),
         ("TEXTCOLOR", (0, 0), (-1, 0), hex_color(C.WHITE)),
-        ("BOX", (0, 0), (-1, -1), 0.6, hex_color(C.NAVY)),
+        ("BOX", (0, 0), (-1, -1), 0.5, hex_color(C.NAVY)),
         ("INNERGRID", (0, 0), (-1, -1), 0.25, hex_color(C.BORDER)),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-        ("LEFTPADDING", (0, 0), (-1, -1), 3),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("LEFTPADDING", (0, 0), (-1, -1), 2),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 2),
     ]
 
     # 斑马纹 + 高危行特殊背景
@@ -2819,7 +2858,7 @@ def _render_risk_mitigation_summary(story, S, risk_items):
     if not priority_items:
         return
 
-    story.append(Spacer(1, 6*mm))
+    story.append(Spacer(1, 3*mm))
     story.append(Paragraph(_bf("[!] 必须在发走前应对的风险:"), S["h2"]))
 
     for i, ri in enumerate(priority_items):
@@ -3361,8 +3400,8 @@ def _build_chapter7_checklist(story, S, analysis, clauses):
             tag_cell(tag, bd_col, C.WHITE),
         ])
 
-    # A4 可用宽度 174mm; 分配: 序号10 | 类别28 | 要求90 | 依据16 | 剩余30 = 174mm
-    t = Table(rows, colWidths=[9*mm, 27*mm, 88*mm, 16*mm, 14*mm])
+    # A4 可用宽度 174mm; 分配: 序号10 | 类别28 | 要求92 | 依据16 | 重要28 = 174mm
+    t = Table(rows, colWidths=[10*mm, 28*mm, 92*mm, 16*mm, 28*mm])
     t.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("BACKGROUND", (0, 0), (-1, 0), hex_color(C.NAVY)),
@@ -3370,15 +3409,16 @@ def _build_chapter7_checklist(story, S, analysis, clauses):
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [hex_color(C.WHITE), hex_color(C.LGREY)]),
         ("BOX", (0, 0), (-1, -1), 0.5, hex_color(C.NAVY)),
         ("INNERGRID", (0, 0), (-1, -1), 0.25, hex_color(C.BORDER)),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-        ("LEFTPADDING", (0, 0), (-1, -1), 3),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("LEFTPADDING", (0, 0), (-1, -1), 2),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 2),
     ]))
     story.append(t)
 
+    story.append(Spacer(1, 2*mm))
     # 范围说明
-    story.append(Spacer(1, 3*mm))
+    story.append(Spacer(1, 2*mm))
     story.append(note_box(
         "[i] 提示",
         "本备查清单仅包含本信用证明确写入的条款要求。未出现在本证中的行业惯例要求不在此列。",
@@ -3471,7 +3511,7 @@ def _build_chapter8_summary(story, S, analysis, clauses, anomalies):
     story.append(box_para(Paragraph(conclusion_text, S["body"]), conclusion_bg(level), conclusion_bd(level)))
 
     # 重点行动项
-    story.append(Spacer(1, 6*mm))
+    story.append(Spacer(1, 3*mm))
     high_items = [a for a in (anomalies or [])
                   if str(a.get("severity", "")).lower() in ("high", "critical", "严重")]
     med_items = [a for a in (anomalies or [])
@@ -3536,16 +3576,16 @@ def generate_lc_review_report(analysis, output_path):
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     # ========== 封面/标题区 ==========
-    story.append(Spacer(1, 8*mm))
+    story.append(Spacer(1, 4*mm))
     story.append(Paragraph("信用证(L/C)条款审核报告", S["title"]))
-    story.append(Spacer(1, 2*mm))
+    story.append(Spacer(1, 1*mm))
 
     subtitle_parts = [analysis.get("lc_no") or "未知"]
     if analysis.get("amount"):
         subtitle_parts.append(f"金额：{_fmt_amount(analysis['amount'])}")
     story.append(Paragraph(" | ".join(subtitle_parts), S["subtitle"]))
     story.append(Paragraph(f"报告生成时间：{now}", S["small"]))
-    story.append(HRFlowable(width="100%", thickness=1, color=hex_color(C.BORDER), spaceAfter=8*mm))
+    story.append(HRFlowable(width="100%", thickness=1, color=hex_color(C.BORDER), spaceAfter=4*mm))
 
     # ========== 提取关键数据 ==========
     clauses = analysis.get("clauses", {})
