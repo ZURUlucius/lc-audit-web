@@ -289,7 +289,10 @@ def _try_ocr_rapidocr(pdf_path, result_dict):
         import pypdfium2 as pdfium
         import numpy as np
         from PIL import Image
-        from rapidocr_onnxruntime import RapidOCR
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+        except ImportError:
+            from rapidocr import RapidOCR
         
         ocr = RapidOCR()
         doc = pdfium.PdfDocument(pdf_path)
@@ -370,8 +373,20 @@ def _try_pymupdf_ocr(pdf_path):
         from PIL import Image as PILImage
         import io
         import numpy as np
+    except ImportError:
+        meta["warnings"].append("PyMuPDF 未安装")
+        return "", meta
+    
+    try:
         from rapidocr_onnxruntime import RapidOCR
-        
+    except ImportError:
+        try:
+            from rapidocr import RapidOCR
+        except ImportError:
+            meta["warnings"].append("RapidOCR 未安装")
+            return "", meta
+    
+    try:
         ocr = RapidOCR()
         doc = fitz.open(pdf_path)
         
@@ -399,9 +414,7 @@ def _try_pymupdf_ocr(pdf_path):
         if len(full_text.strip()) >= 50:
             meta["confidence"] = "medium"
             return full_text, meta
-    
-    except ImportError:
-        meta["warnings"].append("PyMuPDF 或 RapidOCR 未安装")
+
     except Exception as e:
         meta["warnings"].append(f"PyMuPDF+OCR 失败: {e}")
     
