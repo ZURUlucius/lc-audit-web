@@ -233,7 +233,17 @@ def api_audit():
             app.logger.info(f"[{job_id}] Phase 3-4: Running compliance check...")
             from utils.compliance import check_compliance, summarize_checks
 
-            checks = check_compliance(lc_text, lc_analysis, doc_texts, doc_labels)
+            # Wrap raw text list into dict format expected by check_compliance()
+            doc_results = []
+            for i, (text, label) in enumerate(zip(doc_texts, doc_labels)):
+                doc_results.append({
+                    "filename": label,
+                    "type": "",
+                    "text": text,
+                    "is_ocr": doc_ocr_flags[i] if i < len(doc_ocr_flags) else False,
+                })
+
+            checks = check_compliance(lc_text, lc_analysis, doc_results, doc_labels)
             summary = summarize_checks(checks)
 
             from utils.report_builder import generate_compliance_report
