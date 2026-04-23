@@ -773,7 +773,7 @@ def _check_bl(check_obj, text, fields, lc_analysis):
     if text:
         t_upper = text.upper()
         if ("CLEAN ON BOARD" in t_upper or "CLEAN ABOARD" in t_upper
-                or "ON BOARD" in t_lower ):
+                or "ON BOARD" in t_upper):
             check_obj["items"].append({
                 "check": "清洁已装船批注 (Clean On Board)",
                 "status": "PASS",
