@@ -37,47 +37,66 @@ from reportlab.pdfbase.ttfonts import TTFont
 # =============================================================================
 
 def _register_fonts():
-    """注册中文字体"""
+    """注册中文字体 — 优先使用项目内嵌字体，确保 Linux 云端环境可用"""
+    import sys
+
+    # 项目内嵌字体目录（相对于 utils/ 的上级）
+    _base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _embedded_dir = os.path.join(_base_dir, "static", "fonts")
+
     font_paths = [
-        # Windows 常见路径
-        ("C:/Windows/Fonts/msyh.ttc", "msyh", 0),       # 微软雅黑
-        ("C:/Windows/Fonts/msyhbd.ttc", "msyhbd", 0),    # 微软雅黑粗体
-        ("C:/Windows/Fonts/simhei.ttf", "SimHei", 0),     # 黑体
-        ("C:/Windows/Fonts/simsun.ttc", "simsun", 1),     # 宋体
-        # Linux 备选
+        # === 优先级1：项目内嵌字体（跨平台保证）===
+        (os.path.join(_embedded_dir, "simhei.ttf"), "SimHei", 0),
+        (os.path.join(_embedded_dir, "msyh.ttc"), "msyh", 0),
+        (os.path.join(_embedded_dir, "simsun.ttc"), "simsun", 1),
+        # === 优先级2：Windows 系统字体 ===
+        ("C:/Windows/Fonts/msyh.ttc", "msyh_win", 0),
+        ("C:/Windows/Fonts/simhei.ttf", "SimHei_win", 0),
+        # === 优先级3：Linux 系统字体 ===
         ("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", "wqy", 0),
         ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "noto", 0),
-        # macOS 备选
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "dejavu", 0),  # 最后兜底
+        # === 优先级4：macOS 系统字体 ===
         ("/System/Library/Fonts/PingFang.ttc", "PingFang", 0),
-        ("/Library/Fonts/Arial Unicode.ttf", "Arial", 0),
+        ("/Library/Fonts/Arial Unicode.ttf", "ArialUni", 0),
     ]
+
     registered = False
+    registered_names = []
     for path, name, index in font_paths:
         if os.path.exists(path):
             try:
                 pdfmetrics.registerFont(TTFont(name, path, subfontIndex=index))
-                if not registered:
-                    registered = True
-            except Exception:
+                registered = True
+                registered_names.append(name)
+            except Exception as e:
+                print(f"[LC Audit] Font register warning: {name} ({path}): {e}")
                 continue
-    return registered
 
-_registered = _register_fonts()
+    if not registered:
+        print("[LC Audit] WARNING: No CJK font found! Chinese characters will render as squares.")
+
+    return registered, registered_names
+
+_registered_result = _register_fonts()
+_registered = _registered_result[0] if isinstance(_registered_result, tuple) else _registered_result
 
 def get_font_name():
     """获取可用中文字体名称"""
-    global _registered
-    fonts = ["msyh", "msyhbd", "SimHei", "simsun", "wqy", "noto", "PingFang"]
-    for f in fonts:
+    # 按优先级顺序查找已注册的中文字体
+    candidates = ["SimHei", "msyh", "SimHei_win", "msyh_win", "simsun",
+                  "wqy", "noto", "PingFang", "ArialUni"]
+    for f in candidates:
         try:
             pdfmetrics.getFont(f)
             return f
         except Exception:
             continue
+    print("[LC Audit] WARNING: Falling back to Helvetica — Chinese will NOT render!")
     return "Helvetica"  # 最终兜底（中文会显示为方块）
 
 FONT = get_font_name()
-FONT_BOLD = FONT  # 粗体用同一个字体（微软雅黑本身就够粗）
+FONT_BOLD = FONT  # 粗体用同一个字体
 
 
 # =============================================================================
@@ -129,12 +148,12 @@ def make_styles():
     S["body"]        = P("body", fontSize=9.5, leading=15, textColor=hex_color(C.DGREY), spaceAfter=4, alignment=TA_JUSTIFY, wordWrap="CJK")
     S["bl"]          = P("bl", fontSize=9.5, leading=15, textColor=hex_color(C.DGREY), spaceAfter=3, wordWrap="CJK")
     S["small"]       = P("small", fontSize=8.5, leading=13, textColor=hex_color(C.GREY), spaceAfter=2, wordWrap="CJK")
-    S["label"]       = P("label", fontSize=9, leading=14, textColor=hex_color(C.GREY))
-    S["value"]       = P("value", fontSize=9.5, leading=15, textColor=hex_color(C.DGREY))
+    S["label"]       = P("label", fontSize=9, leading=14, textColor=hex_color(C.GREY), wordWrap="CJK")
+    S["value"]       = P("value", fontSize=9.5, leading=15, textColor=hex_color(C.DGREY), wordWrap="CJK")
 
     # 表格样式
-    S["th"]          = P("th", fontSize=9, leading=14, textColor=hex_color(C.WHITE), alignment=TA_CENTER, fontName=FONT_BOLD)
-    S["tc"]          = P("tc", fontSize=9, leading=14, textColor=hex_color(C.DGREY))
+    S["th"]          = P("th", fontSize=9, leading=14, textColor=hex_color(C.WHITE), alignment=TA_CENTER, fontName=FONT_BOLD, wordWrap="CJK")
+    S["tc"]          = P("tc", fontSize=9, leading=14, textColor=hex_color(C.DGREY), wordWrap="CJK")
 
     # 风险等级专用
     S["risk_high"]   = P("risk_h", fontSize=9, leading=14, textColor=hex_color("#991B1B"), fontName=FONT_BOLD)
@@ -1731,7 +1750,7 @@ def _render_anomaly_table(story, S, anomalies, clauses=None):
         rows.append(row_data)
 
     # ---- 表格样式 ----
-    col_widths = [24*mm, 18*mm, 52*mm, 40*mm, 36*mm]
+    col_widths = [22*mm, 16*mm, 48*mm, 38*mm, 32*mm]
 
     t = Table(rows, colWidths=col_widths)
 
@@ -2612,7 +2631,7 @@ def _render_risk_matrix_table(story, S, risk_items):
         rows.append(row_data)
 
     # 表格样式
-    col_widths = [38*mm, 18*mm, 20*mm, 94*mm]
+    col_widths = [34*mm, 16*mm, 18*mm, 86*mm]
     t = Table(rows, colWidths=col_widths)
 
     base_style = [
@@ -3505,7 +3524,7 @@ def generate_compliance_report(check_result, output_path):
                     Paragraph(_esc(chk.get("suggestion", "")), S["small"]),
                 ])
 
-            t = Table(rows, colWidths=[38*mm, 18*mm, 80*mm, 54*mm])
+            t = Table(rows, colWidths=[34*mm, 16*mm, 68*mm, 46*mm])
             t.setStyle(TableStyle([
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("BACKGROUND", (0, 0), (-1, 0), hex_color(C.NAVY)),
