@@ -3637,15 +3637,16 @@ def generate_lc_review_report(analysis, output_path):
 # 报告 2：交单合规审核报告（Compliance Report）— 全中文版（保持不变）
 # =============================================================================
 
-def generate_compliance_report(check_result, output_path):
+def generate_compliance_report(lc_analysis, checks, summary, doc_labels, output_path):
     """
     生成中文版交单合规审核报告 PDF。
 
-    check_result 来自 compliance.check_compliance()，包含：
-      - lc_info: dict
-      - documents: {doc_type: {text, ocr, ...}}
-      - results: [{doc_type, check_item, status, detail, suggestion}]
-      - time_checks: list
+    参数:
+        lc_analysis: LC 分析结果 (from analyze_lc)
+        checks: 合规检查结果列表 (from check_compliance)
+        summary: 检查汇总 (from summarize_checks)
+        doc_labels: 文件标签列表
+        output_path: PDF 输出路径
     """
     doc = SimpleDocTemplate(
         output_path,
@@ -3667,33 +3668,41 @@ def generate_compliance_report(check_result, output_path):
     story.append(HRFlowable(width="100%", thickness=1, color=hex_color(C.BORDER), spaceAfter=8*mm))
 
     # ========== 基本信息 ==========
-    lc_info = check_result.get("lc_info", {})
-    if lc_info:
+    if lc_analysis:
         story.append(Paragraph("信用证基本信息", S["h1"]))
         bi_data = [
-            ("信用证号码", lc_info.get("lc_no")),
-            ("开证行", lc_info.get("issuing_bank")),
-            ("申请人", _wrap_long(lc_info.get("applicant"), 200)),
-            ("受益人", _wrap_long(lc_info.get("beneficiary"), 200)),
-            ("金额", _fmt_amount(lc_info.get("amount"))),
-            ("最迟装船日", lc_info.get("latest_shipment")),
-            ("到期日", lc_info.get("expiry_date")),
+            ("信用证号码", lc_analysis.get("lc_no")),
+            ("开证行", lc_analysis.get("issuing_bank")),
+            ("申请人", _wrap_long(lc_analysis.get("applicant"), 200)),
+            ("受益人", _wrap_long(lc_analysis.get("beneficiary"), 200)),
+            ("金额", _fmt_amount(lc_analysis.get("amount"))),
+            ("最迟装船日", lc_analysis.get("latest_shipment")),
+            ("到期日", lc_analysis.get("expiry_date")),
         ]
         story.append(info_tbl(bi_data))
         story.append(Spacer(1, 6*mm))
 
     # ========== 各单据审核结果 ==========
-    documents = check_result.get("documents", {})
-    results = check_result.get("results", [])
+    # Flatten checks: each check is a doc with .items list
+    results = []
+    time_checks_raw = []
+    for chk in checks:
+        doc_type = chk.get("doctype") or chk.get("filename", "未知")
+        for item in chk.get("items", []):
+            item["doc_type"] = doc_type
+            results.append(item)
+        # Extract time checks (system-level entry)
+        if chk.get("filename") == "[系统交叉核对]":
+            time_checks_raw = chk.get("items", [])
 
     if results:
-        # 汇总
-        summary = summarize_checks(results)
+        # Use passed-in summary
+        _sum = summary or {}
         story.append(Paragraph(
-            f"<b>审核汇总：</b>共 <b>{summary['total']}</b> 项检查 | "
-            f"<font color='#059669'>通过 {summary['passed']}</font> | "
-            f"<font color='#D97706'>警告 {summary['warned']}</font> | "
-            f"<font color='#DC2626'>不通过 {summary['failed']}</font>",
+            f"<b>审核汇总：</b>共 <b>{_sum.get('total_checks', len(results))}</b> 项检查 | "
+            f"<font color='#059669'>通过 {_sum.get('pass_count', 0)}</font> | "
+            f"<font color='#D97706'>警告 {_sum.get('warn_count', 0)}</font> | "
+            f"<font color='#DC2626'>不通过 {_sum.get('fail_count', 0)}</font>",
             S["body"]
         ))
         story.append(Spacer(1, 4*mm))
@@ -3748,8 +3757,7 @@ def generate_compliance_report(check_result, output_path):
             story.append(Spacer(1, 4*mm))
 
     # ========== 时间合规检查 ==========
-    time_checks = check_result.get("time_checks", [])
-    if time_checks:
+    if time_checks_raw:
         story.append(Paragraph("时间合规检查", S["h1"]))
         tc_rows = [[
             Paragraph("<b>检查项</b>", S["th"]),
@@ -3757,14 +3765,14 @@ def generate_compliance_report(check_result, output_path):
             Paragraph("<b>单据日期</b>", S["th"]),
             Paragraph("<b>结果</b>", S["th"]),
         ]]
-        for tc in time_checks:
-            result = tc.get("result", "UNKNOWN")
+        for tc in time_checks_raw:
+            result = tc.get("status", "UNKNOWN")
             rc = C.GREEN_BD if result == "PASS" else (C.RED_BD if result == "FAIL" else C.AMBER_BD)
             rt = "PASS" if result == "PASS" else ("FAIL" if result == "FAIL" else "WARN")
             tc_rows.append([
-                Paragraph(_esc(tc.get("item", "")), S["body"]),
-                Paragraph(_esc(tc.get("lc_requirement", "")), S["tc"]),
-                Paragraph(_esc(tc.get("doc_value", "")), S["tc"]),
+                Paragraph(_esc(tc.get("check", "")), S["body"]),
+                Paragraph(_esc(tc.get("detail", "")), S["tc"]),
+                Paragraph("", S["tc"]),
                 tag_cell(rt, rc, C.WHITE),
             ])
         tc_table = Table(tc_rows, colWidths=[40*mm, 45*mm, 45*mm, 24*mm])
@@ -3798,8 +3806,8 @@ def generate_compliance_report(check_result, output_path):
     story.append(Spacer(1, 6*mm))
     story.append(Paragraph("审核结论", S["h1"]))
 
-    fail_count = sum(1 for r in results if r.get("status") == "FAIL")
-    warn_count = sum(1 for r in results if r.get("status") == "WARN")
+    fail_count = _sum.get("fail_count", 0) if _sum else sum(1 for r in results if r.get("status") == "FAIL")
+    warn_count = _sum.get("warn_count", 0) if _sum else sum(1 for r in results if r.get("status") == "WARN")
 
     if fail_count > 0:
         conclusion_level_compliance = "danger"
