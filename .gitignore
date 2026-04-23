@@ -49,3 +49,4 @@ desktop.ini
 
 # ── 本地启动脚本（云端不需要） ──
 start_server.py
+download_font.py
